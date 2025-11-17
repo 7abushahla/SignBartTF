@@ -119,35 +119,44 @@ def count_model_parameters(config):
 def determine_keypoint_groups(config_joint_idx):
     """
     Determine how to group keypoints for normalization.
-    Returns a list of lists for normalization groups.
+    Returns a list of lists, where each inner list is a group to normalize together.
+    
+    Matches the logic from main_functional.py for consistency.
+    Assumes structure: Pose + Left Hand (21) + Right Hand (21) + Face (remaining)
     """
-    groups = []
+    if not config_joint_idx:
+        return []
     
-    body_kpts = []
-    left_hand_kpts = []
-    right_hand_kpts = []
-    face_kpts = []
+    # Sort indices to ensure they're in order
+    sorted_idx = sorted(config_joint_idx)
     
-    for idx in config_joint_idx:
-        if idx < 33:
-            body_kpts.append(idx)
-        elif idx < 54:
-            left_hand_kpts.append(idx)
-        elif idx < 75:
-            right_hand_kpts.append(idx)
-        else:  # idx >= 75
-            face_kpts.append(idx)
+    total_kpts = len(sorted_idx)
     
-    if body_kpts:
-        groups.append(body_kpts)
-    if left_hand_kpts:
-        groups.append(left_hand_kpts)
-    if right_hand_kpts:
-        groups.append(right_hand_kpts)
-    if face_kpts:
-        groups.append(face_kpts)
-    
-    return groups
+    # Known structure: last 25 are face, previous 21 are right hand, previous 21 are left hand
+    if total_kpts >= 67:  # At least some pose + 2 hands + face (21+21+25=67)
+        # Last 25: face
+        face_kpts = sorted_idx[-25:]
+        # Previous 21: right hand  
+        right_hand_kpts = sorted_idx[-46:-25]
+        # Previous 21: left hand
+        left_hand_kpts = sorted_idx[-67:-46]
+        # Everything else: pose/body
+        body_kpts = sorted_idx[:-67]
+        
+        # Add non-empty groups
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        if left_hand_kpts:
+            groups.append(left_hand_kpts)
+        if right_hand_kpts:
+            groups.append(right_hand_kpts)
+        if face_kpts:
+            groups.append(face_kpts)
+        return groups
+    else:
+        # Fallback: just use all as one group
+        return [sorted_idx]
 
 
 def get_custom_objects():
@@ -166,6 +175,146 @@ def get_custom_objects():
         "ExtractLastValidToken": ExtractLastValidToken,
         "Top5Accuracy": Top5Accuracy,
     }
+
+
+def evaluate_tflite_model(tflite_path, data_path, config, user, model_type="TFLite"):
+    """
+    Evaluate a TFLite model on test set.
+    
+    Args:
+        tflite_path: Path to TFLite model file
+        data_path: Path to LOSO data directory
+        config: Model configuration dict
+        user: User ID
+        model_type: Type label for logging (e.g., "PTQ", "QAT")
+    
+    Returns:
+        dict: Evaluation results or None if failed
+    """
+    if not os.path.exists(tflite_path):
+        return None
+    
+    print(f"  [{model_type}] Evaluating {os.path.basename(tflite_path)}...")
+    
+    try:
+        # Load TFLite model
+        interpreter = tf.lite.Interpreter(model_path=tflite_path)
+        interpreter.allocate_tensors()
+        
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
+        
+        # Find input indices by shape (TFLite may reorder inputs)
+        keypoints_idx = None
+        mask_idx = None
+        for idx, detail in enumerate(input_details):
+            if len(detail["shape"]) == 4:  # (batch, seq_len, num_keypoints, 2)
+                keypoints_idx = idx
+            elif len(detail["shape"]) in (2, 3):  # (batch, seq_len) or (batch, seq_len, 1)
+                mask_idx = idx
+        
+        if keypoints_idx is None or mask_idx is None:
+            print(f"    ✗ Could not identify input tensors (found {len(input_details)} inputs)")
+            return None
+        
+        # Determine keypoint groups
+        if 'joint_idx' in config and config['joint_idx']:
+            joint_idx = determine_keypoint_groups(config['joint_idx'])
+        else:
+            joint_idx = None
+        
+        # Load test dataset
+        test_datasets = SignDataset(data_path, "test", shuffle=False, joint_idxs=joint_idx)
+        num_samples = len(test_datasets)
+        
+        # Evaluate
+        correct = 0
+        top5_correct = 0
+        total_loss = 0.0
+        all_preds = []
+        all_labels = []
+        
+        MAX_SEQ_LEN = 64
+        
+        start_time = time.time()
+        for i, file_path in enumerate(test_datasets.list_key):
+            keypoints, label = test_datasets.load_sample(file_path)
+            seq_len = min(keypoints.shape[0], MAX_SEQ_LEN)
+            
+            # Pad to MAX_SEQ_LEN
+            padded_keypoints = np.zeros((MAX_SEQ_LEN, keypoints.shape[1], 2), dtype=np.float32)
+            padded_keypoints[:seq_len] = keypoints[:seq_len]
+            
+            attention_mask = np.zeros(MAX_SEQ_LEN, dtype=np.float32)
+            attention_mask[:seq_len] = 1.0
+            
+            # Prepare inputs (add batch dimension)
+            interpreter.set_tensor(input_details[keypoints_idx]["index"], padded_keypoints[None, ...])
+            interpreter.set_tensor(input_details[mask_idx]["index"], attention_mask[None, ...])
+            
+            # Run inference
+            interpreter.invoke()
+            
+            # Get output
+            logits = interpreter.get_tensor(output_details[0]['index'])[0]
+            pred = np.argmax(logits)
+            
+            all_preds.append(pred)
+            all_labels.append(label)
+            
+            if pred == label:
+                correct += 1
+            
+            # Top-5 accuracy
+            top5_preds = np.argsort(logits)[-5:][::-1]
+            if label in top5_preds:
+                top5_correct += 1
+            
+            # Loss (cross-entropy)
+            logits_softmax = tf.nn.softmax(logits)
+            loss = -np.log(logits_softmax[label] + 1e-10)
+            total_loss += loss
+        
+        inference_time = time.time() - start_time
+        accuracy = correct / num_samples if num_samples > 0 else 0
+        top5_accuracy = top5_correct / num_samples if num_samples > 0 else 0
+        avg_loss = total_loss / num_samples if num_samples > 0 else 0
+        
+        # Per-class accuracy
+        all_preds = np.array(all_preds)
+        all_labels = np.array(all_labels)
+        per_class_acc = {}
+        for class_idx in sorted(np.unique(all_labels)):
+            class_mask = all_labels == class_idx
+            class_correct = (all_preds[class_mask] == all_labels[class_mask]).sum()
+            class_total = class_mask.sum()
+            class_acc = class_correct / class_total if class_total > 0 else 0
+            class_name = f"G{class_idx+1:02d}"
+            per_class_acc[class_name] = class_acc
+        
+        # Get file size
+        file_size_mb = os.path.getsize(tflite_path) / (1024**2)
+        
+        print(f"    Accuracy: {accuracy*100:.2f}%, Top-5: {top5_accuracy*100:.2f}%, Loss: {avg_loss:.4f}")
+        print(f"    Inference time: {inference_time:.2f}s, Size: {file_size_mb:.2f} MB")
+        
+        return {
+            'test_acc': accuracy,
+            'test_top5': top5_accuracy,
+            'test_loss': avg_loss,
+            'inference_time': inference_time,
+            'time_per_sample': inference_time / num_samples if num_samples > 0 else 0,
+            'num_test_samples': num_samples,
+            'per_class_acc': per_class_acc,
+            'file_size_mb': file_size_mb,
+            'model_path': tflite_path
+        }
+        
+    except Exception as e:
+        print(f"    ✗ Error evaluating TFLite model: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user):
@@ -319,6 +468,9 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
     except Exception as e:
         print(f"  ⚠️  Warning: Could not collect per-class accuracies: {e}")
     
+    # Get checkpoint file size
+    checkpoint_size_mb = os.path.getsize(checkpoint_path) / (1024**2)
+    
     # Return results in same format as parse_log_file()
     results_dict = {
         'train_acc': [],
@@ -340,7 +492,9 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         'test_top5': results.get('top5_accuracy', 0),
         'per_class_acc': per_class_acc,
         'evaluated_from_checkpoint': True,
-        'checkpoint_used': checkpoint_file
+        'checkpoint_used': checkpoint_file,
+        'file_size_mb': checkpoint_size_mb,
+        'model_path': checkpoint_path
     }
     
     print(f"\n  Results:")
@@ -485,40 +639,86 @@ def calculate_per_class_statistics(all_results):
     return class_stats
 
 
-def save_csv_summary(all_results, output_dir="results"):
+def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflite_results=None, output_dir="results"):
     """Save summary tables as CSV files."""
     os.makedirs(output_dir, exist_ok=True)
+    
+    if ptq_results is None:
+        ptq_results = {}
+    if qat_results is None:
+        qat_results = {}
+    if fp32_tflite_results is None:
+        fp32_tflite_results = {}
     
     # Summary table
     summary_file = os.path.join(output_dir, "summary_table.csv")
     with open(summary_file, 'w') as f:
         has_validation = any(r.get('has_validation', True) for r in all_results.values())
         show_test = any(r.get('test_acc') is not None for r in all_results.values())
+        has_ptq = any(os.path.exists(f"exports/ptq_loso/{user}/model_dynamic_int8.tflite") for user in TEST_USERS)
+        has_qat = any(os.path.exists(f"exports/qat_loso/{user}/qat_dynamic_int8.tflite") for user in TEST_USERS)
         
-        header = "Test Signer,Train Acc (%)"
-        if has_validation:
-            header += ",Val Acc (%)"
-        if show_test:
-            header += ",Test Acc (%)"
-        header += ",Train Time (h),Inference (ms)\n"
+        header = "Test Signer,FP32 Acc (%),FP32 Size (MB),FP32 Time (ms)"
+        if has_ptq:
+            header += ",PTQ Acc (%),PTQ Size (MB),PTQ Time (ms)"
+        if has_qat:
+            header += ",QAT Acc (%),QAT Size (MB),QAT Time (ms)"
+        header += "\n"
         f.write(header)
         
         for user in TEST_USERS:
-            results = all_results.get(user)
-            if results:
-                train_acc = results['best_train_acc'] * 100
-                val_acc = results['best_val_acc'] * 100 if has_validation else 0
-                test_acc = results['test_acc'] * 100 if results['test_acc'] is not None else 0
-                train_time = results['total_training_time'] / 3600 if results['total_training_time'] else 0
-                inference_ms = (results.get('time_per_sample')*1000) if results.get('time_per_sample') else ((results['inference_time']/results['num_test_samples']*1000) if (results.get('num_test_samples') and results.get('inference_time')) else 0)
-                
-                row = f"{user},{train_acc:.2f}"
-                if has_validation:
-                    row += f",{val_acc:.2f}"
-                if show_test:
-                    row += f",{test_acc:.2f}"
-                row += f",{train_time:.2f},{inference_ms:.2f}\n"
-                f.write(row)
+            exp_name = f"{EXPERIMENT_PREFIX}{user}"
+            
+            # FP32 TFLite results (use TFLite for consistency)
+            fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+            fp32_acc = fp32_tflite_results.get(user, {}).get('test_acc', 0) * 100 if fp32_tflite_results.get(user) else 0
+            fp32_size = fp32_tflite_results.get(user, {}).get('file_size_mb', 0) if fp32_tflite_results.get(user) else 0
+            fp32_time_ms = fp32_tflite_results.get(user, {}).get('time_per_sample', 0) * 1000 if fp32_tflite_results.get(user) else 0
+            
+            # Fallback to file size if not evaluated
+            if not fp32_tflite_results.get(user):
+                if os.path.exists(fp32_tflite_path):
+                    fp32_size = os.path.getsize(fp32_tflite_path) / (1024**2)
+                else:
+                    # Fallback to Keras model results if TFLite not available
+                    results = all_results.get(user)
+                    if results and results.get('test_acc') is not None:
+                        fp32_acc = results['test_acc'] * 100
+                    if results and results.get('file_size_mb'):
+                        fp32_size = results.get('file_size_mb', 0)
+                    fp32_time_ms = (results.get('time_per_sample')*1000) if (results and results.get('time_per_sample')) else ((results['inference_time']/results['num_test_samples']*1000) if (results and results.get('num_test_samples') and results.get('inference_time')) else 0)
+            
+            # PTQ results
+            ptq_acc = ptq_results.get(user, {}).get('test_acc', 0) * 100 if ptq_results.get(user) else 0
+            ptq_size = ptq_results.get(user, {}).get('file_size_mb', 0) if ptq_results.get(user) else 0
+            ptq_time_ms = ptq_results.get(user, {}).get('time_per_sample', 0) * 1000 if ptq_results.get(user) else 0
+            if not ptq_results.get(user):
+                ptq_path = f"exports/ptq_loso/{user}/model_dynamic_int8.tflite"
+                if os.path.exists(ptq_path):
+                    ptq_size = os.path.getsize(ptq_path) / (1024**2)
+            
+            # QAT results
+            qat_acc = qat_results.get(user, {}).get('test_acc', 0) * 100 if qat_results.get(user) else 0
+            qat_size = qat_results.get(user, {}).get('file_size_mb', 0) if qat_results.get(user) else 0
+            qat_time_ms = qat_results.get(user, {}).get('time_per_sample', 0) * 1000 if qat_results.get(user) else 0
+            if not qat_results.get(user):
+                qat_path = f"exports/qat_loso/{user}/qat_dynamic_int8.tflite"
+                if os.path.exists(qat_path):
+                    qat_size = os.path.getsize(qat_path) / (1024**2)
+            
+            row = f"{user},{fp32_acc:.2f},{fp32_size:.2f},{fp32_time_ms:.2f}"
+            if has_ptq:
+                if ptq_results.get(user) or ptq_time_ms > 0:
+                    row += f",{ptq_acc:.2f},{ptq_size:.2f},{ptq_time_ms:.2f}"
+                else:
+                    row += f",N/A,{ptq_size:.2f},N/A"
+            if has_qat:
+                if qat_results.get(user) or qat_time_ms > 0:
+                    row += f",{qat_acc:.2f},{qat_size:.2f},{qat_time_ms:.2f}"
+                else:
+                    row += f",N/A,{qat_size:.2f},N/A"
+            row += "\n"
+            f.write(row)
     
     # Per-class accuracy table
     has_per_class = any(r.get('per_class_acc') for r in all_results.values())
@@ -630,6 +830,11 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
     print(f"\n{'='*80}")
     print(f"REPORT GENERATION MODE: {'MODEL EVALUATION' if run_evaluation else 'LOG PARSING'}")
     print(f"{'='*80}\n")
+    
+    # Store PTQ, QAT, and FP32 TFLite results for CSV export
+    ptq_results_global = {}
+    qat_results_global = {}
+    fp32_tflite_results_global = {}
     
     with DualWriter(output_file, console=console) as writer:
         writer.writeln("="*80)
@@ -802,6 +1007,116 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                 writer.writeln(f"Average Test Set Accuracy (across all test signers): {avg_test_acc*100:.2f}%")
             writer.writeln()
         
+        # 4a. FP32 TFLite Model Results
+        writer.writeln("4a. FP32 TFLITE MODEL RESULTS")
+        writer.writeln("-" * 80)
+        writer.writeln()
+        
+        fp32_tflite_results = {}  # Store for CSV export
+        for user in TEST_USERS:
+            exp_name = f"{EXPERIMENT_PREFIX}{user}"
+            loso_data_path = f"{base_data_path}_LOSO_{user}"
+            fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+            
+            writer.writeln(f"Test Signer: {user.upper()}")
+            
+            if os.path.exists(fp32_tflite_path):
+                if run_evaluation:
+                    fp32_tflite_result = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32-TFLite")
+                    if fp32_tflite_result:
+                        fp32_tflite_results[user] = fp32_tflite_result
+                        fp32_tflite_results_global[user] = fp32_tflite_result
+                        writer.writeln(f"  ✓ FP32 TFLite model evaluated")
+                else:
+                    file_size_mb = os.path.getsize(fp32_tflite_path) / (1024**2)
+                    fp32_tflite_results_global[user] = {'file_size_mb': file_size_mb}
+                    writer.writeln(f"  FP32 TFLite model found: {fp32_tflite_path} ({file_size_mb:.2f} MB)")
+                    writer.writeln(f"  (Run with --run_evaluation to get accuracy metrics)")
+            else:
+                writer.writeln(f"  FP32 TFLite model not found: {fp32_tflite_path}")
+            writer.writeln()
+        
+        if fp32_tflite_results:
+            avg_fp32_tflite_acc = sum(r['test_acc'] for r in fp32_tflite_results.values()) / len(fp32_tflite_results)
+            avg_fp32_tflite_size = sum(r['file_size_mb'] for r in fp32_tflite_results.values()) / len(fp32_tflite_results)
+            avg_fp32_tflite_time = sum(r['time_per_sample'] for r in fp32_tflite_results.values()) / len(fp32_tflite_results) * 1000
+            writer.writeln(f"Average FP32 TFLite Accuracy: {avg_fp32_tflite_acc*100:.2f}%")
+            writer.writeln(f"Average FP32 TFLite Model Size: {avg_fp32_tflite_size:.2f} MB")
+            writer.writeln(f"Average FP32 TFLite Inference Time: {avg_fp32_tflite_time:.2f} ms")
+            writer.writeln()
+        
+        # 4b. PTQ Model Results
+        writer.writeln("4b. POST-TRAINING QUANTIZATION (PTQ) RESULTS")
+        writer.writeln("-" * 80)
+        writer.writeln()
+        
+        ptq_results = {}  # Store for CSV export
+        for user in TEST_USERS:
+            exp_name = f"{EXPERIMENT_PREFIX}{user}"
+            loso_data_path = f"{base_data_path}_LOSO_{user}"
+            ptq_path = f"exports/ptq_loso/{user}/model_dynamic_int8.tflite"
+            
+            writer.writeln(f"Test Signer: {user.upper()}")
+            
+            if os.path.exists(ptq_path):
+                if run_evaluation:
+                    ptq_result = evaluate_tflite_model(ptq_path, loso_data_path, config, user, "PTQ")
+                    if ptq_result:
+                        ptq_results[user] = ptq_result
+                        ptq_results_global[user] = ptq_result
+                        writer.writeln(f"  ✓ PTQ model evaluated")
+                else:
+                    file_size_mb = os.path.getsize(ptq_path) / (1024**2)
+                    ptq_results_global[user] = {'file_size_mb': file_size_mb}
+                    writer.writeln(f"  PTQ model found: {ptq_path} ({file_size_mb:.2f} MB)")
+                    writer.writeln(f"  (Run with --run_evaluation to get accuracy metrics)")
+            else:
+                writer.writeln(f"  PTQ model not found: {ptq_path}")
+            writer.writeln()
+        
+        if ptq_results:
+            avg_ptq_acc = sum(r['test_acc'] for r in ptq_results.values()) / len(ptq_results)
+            avg_ptq_size = sum(r['file_size_mb'] for r in ptq_results.values()) / len(ptq_results)
+            writer.writeln(f"Average PTQ Accuracy: {avg_ptq_acc*100:.2f}%")
+            writer.writeln(f"Average PTQ Model Size: {avg_ptq_size:.2f} MB")
+            writer.writeln()
+        
+        # 4c. QAT Model Results
+        writer.writeln("4c. QUANTIZATION-AWARE TRAINING (QAT) RESULTS")
+        writer.writeln("-" * 80)
+        writer.writeln()
+        
+        qat_results = {}
+        for user in TEST_USERS:
+            exp_name = f"{EXPERIMENT_PREFIX}{user}"
+            loso_data_path = f"{base_data_path}_LOSO_{user}"
+            qat_path = f"exports/qat_loso/{user}/qat_dynamic_int8.tflite"
+            
+            writer.writeln(f"Test Signer: {user.upper()}")
+            
+            if os.path.exists(qat_path):
+                if run_evaluation:
+                    qat_result = evaluate_tflite_model(qat_path, loso_data_path, config, user, "QAT")
+                    if qat_result:
+                        qat_results[user] = qat_result
+                        qat_results_global[user] = qat_result
+                        writer.writeln(f"  ✓ QAT model evaluated")
+                else:
+                    file_size_mb = os.path.getsize(qat_path) / (1024**2)
+                    qat_results_global[user] = {'file_size_mb': file_size_mb}
+                    writer.writeln(f"  QAT model found: {qat_path} ({file_size_mb:.2f} MB)")
+                    writer.writeln(f"  (Run with --run_evaluation to get accuracy metrics)")
+            else:
+                writer.writeln(f"  QAT model not found: {qat_path}")
+            writer.writeln()
+        
+        if qat_results:
+            avg_qat_acc = sum(r['test_acc'] for r in qat_results.values()) / len(qat_results)
+            avg_qat_size = sum(r['file_size_mb'] for r in qat_results.values()) / len(qat_results)
+            writer.writeln(f"Average QAT Accuracy: {avg_qat_acc*100:.2f}%")
+            writer.writeln(f"Average QAT Model Size: {avg_qat_size:.2f} MB")
+            writer.writeln()
+        
         # 5. Per-Class Accuracy Table (if available)
         writer.writeln("5. PER-CLASS ACCURACY (Test Set)")
         writer.writeln("-" * 80)
@@ -894,67 +1209,144 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         
         show_val = has_validation
         show_test = any(r.get('test_acc') is not None for r in all_results.values())
+        has_ptq = any(os.path.exists(f"exports/ptq_loso/{user}/model_dynamic_int8.tflite") for user in TEST_USERS)
+        has_qat = any(os.path.exists(f"exports/qat_loso/{user}/qat_dynamic_int8.tflite") for user in TEST_USERS)
         
-        header = f"{'Test Signer':<15} {'Train Acc (%)':<15}"
-        if show_val:
-            header += f" {'Val Acc (%)':<15}"
-        if show_test:
-            header += f" {'Test Acc (%)':<15}"
-        header += f" {'Train Time (h)':<18} {'Inference (ms)':<15}"
+        header = f"{'Test Signer':<15} {'FP32 Acc (%)':<15} {'FP32 Size (MB)':<18} {'FP32 Time (ms)':<18}"
+        if has_ptq:
+            header += f" {'PTQ Acc (%)':<15} {'PTQ Size (MB)':<18} {'PTQ Time (ms)':<18}"
+        if has_qat:
+            header += f" {'QAT Acc (%)':<15} {'QAT Size (MB)':<18} {'QAT Time (ms)':<18}"
         
         writer.writeln(header)
         writer.writeln("-" * 80)
         
         for user in TEST_USERS:
-            results = all_results.get(user)
-            if results:
-                train_acc = results['best_train_acc'] * 100
-                val_acc = results['best_val_acc'] * 100 if show_val else 0
-                test_acc = results['test_acc'] * 100 if results['test_acc'] is not None else 0
-                train_time = results['total_training_time'] / 3600 if results['total_training_time'] else 0
-                inference_ms = (results.get('time_per_sample')*1000) if results.get('time_per_sample') else ((results['inference_time']/results['num_test_samples']*1000) if (results.get('num_test_samples') and results.get('inference_time')) else 0)
-                
-                row = f"{user:<15} {train_acc:<15.2f}"
-                if show_val:
-                    row += f" {val_acc:<15.2f}"
-                if show_test:
-                    row += f" {test_acc:<15.2f}"
-                row += f" {train_time:<18.2f} {inference_ms:<15.2f}"
-                writer.writeln(row)
-            else:
-                row = f"{user:<15} {'N/A':<15}"
-                if show_val:
-                    row += f" {'N/A':<15}"
-                if show_test:
-                    row += f" {'N/A':<15}"
-                row += f" {'N/A':<18} {'N/A':<15}"
-                writer.writeln(row)
+            exp_name = f"{EXPERIMENT_PREFIX}{user}"
+            loso_data_path = f"{base_data_path}_LOSO_{user}"
+            
+            # FP32 TFLite results (use TFLite for consistency)
+            fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+            fp32_acc = fp32_tflite_results.get(user, {}).get('test_acc', 0) * 100 if fp32_tflite_results.get(user) else 0
+            fp32_size = fp32_tflite_results.get(user, {}).get('file_size_mb', 0) if fp32_tflite_results.get(user) else 0
+            fp32_time_ms = fp32_tflite_results.get(user, {}).get('time_per_sample', 0) * 1000 if fp32_tflite_results.get(user) else 0
+            
+            # Fallback to file size if not evaluated
+            if not fp32_tflite_results.get(user):
+                if os.path.exists(fp32_tflite_path):
+                    fp32_size = os.path.getsize(fp32_tflite_path) / (1024**2)
+                    # If not evaluated, try to evaluate now for inference time
+                    if run_evaluation:
+                        fp32_tflite_result = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32-TFLite")
+                        if fp32_tflite_result:
+                            fp32_tflite_results[user] = fp32_tflite_result
+                            fp32_tflite_results_global[user] = fp32_tflite_result
+                            fp32_acc = fp32_tflite_result['test_acc'] * 100
+                            fp32_size = fp32_tflite_result['file_size_mb']
+                            fp32_time_ms = fp32_tflite_result['time_per_sample'] * 1000
+                else:
+                    # Fallback to Keras model results if TFLite not available
+                    results = all_results.get(user)
+                    if results and results.get('test_acc') is not None:
+                        fp32_acc = results['test_acc'] * 100
+                    if results and results.get('file_size_mb'):
+                        fp32_size = results.get('file_size_mb', 0)
+                    fp32_time_ms = (results.get('time_per_sample')*1000) if (results and results.get('time_per_sample')) else ((results['inference_time']/results['num_test_samples']*1000) if (results and results.get('num_test_samples') and results.get('inference_time')) else 0)
+            
+            # PTQ results
+            ptq_acc = ptq_results.get(user, {}).get('test_acc', 0) * 100 if ptq_results.get(user) else 0
+            ptq_size = ptq_results.get(user, {}).get('file_size_mb', 0) if ptq_results.get(user) else 0
+            ptq_time_ms = ptq_results.get(user, {}).get('time_per_sample', 0) * 1000 if ptq_results.get(user) else 0
+            
+            if not ptq_results.get(user):
+                ptq_path = f"exports/ptq_loso/{user}/model_dynamic_int8.tflite"
+                if os.path.exists(ptq_path):
+                    ptq_size = os.path.getsize(ptq_path) / (1024**2)
+                    # If not evaluated, try to evaluate now for inference time
+                    if run_evaluation:
+                        ptq_result = evaluate_tflite_model(ptq_path, loso_data_path, config, user, "PTQ")
+                        if ptq_result:
+                            ptq_results[user] = ptq_result
+                            ptq_results_global[user] = ptq_result
+                            ptq_acc = ptq_result['test_acc'] * 100
+                            ptq_time_ms = ptq_result['time_per_sample'] * 1000
+            
+            # QAT results
+            qat_acc = qat_results.get(user, {}).get('test_acc', 0) * 100 if qat_results.get(user) else 0
+            qat_size = qat_results.get(user, {}).get('file_size_mb', 0) if qat_results.get(user) else 0
+            qat_time_ms = qat_results.get(user, {}).get('time_per_sample', 0) * 1000 if qat_results.get(user) else 0
+            
+            if not qat_results.get(user):
+                qat_path = f"exports/qat_loso/{user}/qat_dynamic_int8.tflite"
+                if os.path.exists(qat_path):
+                    qat_size = os.path.getsize(qat_path) / (1024**2)
+                    # If not evaluated, try to evaluate now for inference time
+                    if run_evaluation:
+                        qat_result = evaluate_tflite_model(qat_path, loso_data_path, config, user, "QAT")
+                        if qat_result:
+                            qat_results[user] = qat_result
+                            qat_results_global[user] = qat_result
+                            qat_acc = qat_result['test_acc'] * 100
+                            qat_time_ms = qat_result['time_per_sample'] * 1000
+            
+            row = f"{user:<15} {fp32_acc:<15.2f} {fp32_size:<18.2f} {fp32_time_ms:<18.2f}"
+            if has_ptq:
+                if ptq_results.get(user) or ptq_time_ms > 0:
+                    row += f" {ptq_acc:<15.2f} {ptq_size:<18.2f} {ptq_time_ms:<18.2f}"
+                else:
+                    row += f" {'N/A':<15} {ptq_size:<18.2f} {'N/A':<18}"
+            if has_qat:
+                if qat_results.get(user) or qat_time_ms > 0:
+                    row += f" {qat_acc:<15.2f} {qat_size:<18.2f} {qat_time_ms:<18.2f}"
+                else:
+                    row += f" {'N/A':<15} {qat_size:<18.2f} {'N/A':<18}"
+            writer.writeln(row)
         
         writer.writeln("-" * 80)
         
         # Calculate averages
-        if all_results:
-            avg_train_acc = sum(r['best_train_acc'] for r in all_results.values()) / len(all_results) * 100
-            
-            train_times = [r['total_training_time'] for r in all_results.values() if r['total_training_time']]
-            avg_train_time = (sum(train_times) / len(train_times) / 3600) if train_times else 0
-            
-            time_per_samples = [r.get('time_per_sample') or ((r['inference_time']/r['num_test_samples']) if (r.get('inference_time') and r.get('num_test_samples')) else None) for r in all_results.values()]
-            valid_tps = [x for x in time_per_samples if x is not None]
-            avg_inference = (sum(valid_tps)/len(valid_tps)*1000) if valid_tps else 0
-            
-            row = f"{'AVERAGE':<15} {avg_train_acc:<15.2f}"
-            
-            if show_val:
-                avg_val_acc = sum(r['best_val_acc'] for r in all_results.values()) / len(all_results) * 100
-                row += f" {avg_val_acc:<15.2f}"
-            
-            if show_test:
+        if fp32_tflite_results or all_results:
+            # Use FP32 TFLite results if available, otherwise fallback to Keras
+            if fp32_tflite_results:
+                avg_fp32_acc = sum(r['test_acc'] for r in fp32_tflite_results.values()) / len(fp32_tflite_results) * 100
+                avg_fp32_size = sum(r['file_size_mb'] for r in fp32_tflite_results.values()) / len(fp32_tflite_results)
+                avg_fp32_time = sum(r['time_per_sample'] for r in fp32_tflite_results.values()) / len(fp32_tflite_results) * 1000
+            else:
                 test_accs = [r['test_acc'] for r in all_results.values() if r['test_acc'] is not None]
-                avg_test_acc = (sum(test_accs) / len(test_accs) * 100) if test_accs else 0
-                row += f" {avg_test_acc:<15.2f}"
+                avg_fp32_acc = (sum(test_accs) / len(test_accs) * 100) if test_accs else 0
+                
+                fp32_tflite_sizes = []
+                for user in TEST_USERS:
+                    exp_name = f"{EXPERIMENT_PREFIX}{user}"
+                    fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+                    if os.path.exists(fp32_tflite_path):
+                        fp32_tflite_sizes.append(os.path.getsize(fp32_tflite_path) / (1024**2))
+                avg_fp32_size = (sum(fp32_tflite_sizes) / len(fp32_tflite_sizes)) if fp32_tflite_sizes else 0
+                
+                time_per_samples = [r.get('time_per_sample') or ((r['inference_time']/r['num_test_samples']) if (r.get('inference_time') and r.get('num_test_samples')) else None) for r in all_results.values()]
+                valid_tps = [x for x in time_per_samples if x is not None]
+                avg_fp32_time = (sum(valid_tps)/len(valid_tps)*1000) if valid_tps else 0
             
-            row += f" {avg_train_time:<18.2f} {avg_inference:<15.2f}"
+            row = f"{'AVERAGE':<15} {avg_fp32_acc:<15.2f} {avg_fp32_size:<18.2f} {avg_fp32_time:<18.2f}"
+            
+            if has_ptq:
+                if ptq_results:
+                    avg_ptq_acc = sum(r['test_acc'] for r in ptq_results.values()) / len(ptq_results) * 100
+                    avg_ptq_size = sum(r['file_size_mb'] for r in ptq_results.values()) / len(ptq_results)
+                    avg_ptq_time = sum(r['time_per_sample'] for r in ptq_results.values()) / len(ptq_results) * 1000
+                    row += f" {avg_ptq_acc:<15.2f} {avg_ptq_size:<18.2f} {avg_ptq_time:<18.2f}"
+                else:
+                    row += f" {'N/A':<15} {'N/A':<18} {'N/A':<18}"
+            
+            if has_qat:
+                if qat_results:
+                    avg_qat_acc = sum(r['test_acc'] for r in qat_results.values()) / len(qat_results) * 100
+                    avg_qat_size = sum(r['file_size_mb'] for r in qat_results.values()) / len(qat_results)
+                    avg_qat_time = sum(r['time_per_sample'] for r in qat_results.values()) / len(qat_results) * 1000
+                    row += f" {avg_qat_acc:<15.2f} {avg_qat_size:<18.2f} {avg_qat_time:<18.2f}"
+                else:
+                    row += f" {'N/A':<15} {'N/A':<18} {'N/A':<18}"
+            
             writer.writeln(row)
             writer.writeln("=" * 80)
             writer.writeln()
@@ -971,8 +1363,17 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                 if test_accs:
                     avg_test_acc = sum(test_accs) / len(test_accs) * 100
                     writer.writeln(f"✓ Average test set accuracy: {avg_test_acc:.2f}%")
-            writer.writeln(f"✓ Total training time: {avg_train_time * len(all_results):.2f} hours")
-            writer.writeln(f"✓ Average inference time: {avg_inference:.2f} ms per sample")
+            train_times = [r['total_training_time'] for r in all_results.values() if r.get('total_training_time')]
+            if train_times:
+                avg_train_time = sum(train_times) / len(train_times) / 3600
+                writer.writeln(f"✓ Total training time: {avg_train_time * len(all_results):.2f} hours")
+            # Calculate average inference time from FP32 TFLite if available
+            if fp32_tflite_results_global:
+                avg_fp32_time = sum(r['time_per_sample'] for r in fp32_tflite_results_global.values()) / len(fp32_tflite_results_global) * 1000
+                writer.writeln(f"✓ Average FP32 TFLite inference time: {avg_fp32_time:.2f} ms per sample")
+            elif ptq_results_global:
+                avg_ptq_time = sum(r['time_per_sample'] for r in ptq_results_global.values()) / len(ptq_results_global) * 1000
+                writer.writeln(f"✓ Average PTQ inference time: {avg_ptq_time:.2f} ms per sample")
         else:
             writer.writeln("✗ No training results found")
             writer.writeln("  Please run training or ensure checkpoints/logs are available")
@@ -986,7 +1387,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
     
     # Save CSV files
     if save_csv and all_results:
-        save_csv_summary(all_results)
+        save_csv_summary(all_results, ptq_results=ptq_results_global, qat_results=qat_results_global, fp32_tflite_results=fp32_tflite_results_global)
         save_training_curves(all_results)
     
     return output_file
