@@ -1,0 +1,83 @@
+# e-LSTM Model Configuration
+# Adapted from original paper for 2D keypoints (90 × 2 = 180 features)
+
+model:
+  name: "e-LSTM"
+  num_classes: 10  # Arabic ASL dataset (G01-G10)
+  seq_len: 64  # Fixed sequence length (number of frames)
+  
+  # Architecture (faithful to paper)
+  architecture:
+    num_keypoints: 90
+    coords_per_keypoint: 2  # x, y (no z)
+    input_features: 180  # 90 × 2
+    
+    lstm1_units: 1024  # Original paper size
+    lstm2_units: 512   # Original paper size
+    attention_units: 64  # Original paper size
+    fc_units: 64       # Original paper size
+    dropout_rate: 0.5  # Original paper dropout
+
+# Training hyperparameters (optimized for all LOSO users)
+training:
+  batch_size: 32  # Keep at 32 for memory efficiency
+  epochs: 120  # Increased for harder users (user08 needs more time)
+  learning_rate: 0.0002  # Match SignBart's 2e-4 (was 1e-3 = too high!)
+  optimizer: "adam"
+  loss: "categorical_crossentropy"
+  
+  # Early stopping (much more patient for harder users)
+  early_stopping:
+    enabled: true
+    patience: 25  # Increased from 15 - give harder users more time
+    monitor: "val_loss"
+  
+  # Learning rate schedule (more patient)
+  reduce_lr:
+    enabled: true
+    factor: 0.5
+    patience: 8  # Increased from 5 - don't reduce LR too quickly
+    min_lr: 0.000001
+
+# Data preprocessing
+data:
+  padding_value: 0.0
+  augmentation:
+    enabled: true  # Enable to combat overfitting with small dataset
+    temporal_shift: 0.1  # Shift sequences by ±10%
+    noise_scale: 0.02  # Add small random noise to keypoints
+
+# Grouped normalization (matches SignBart and arabic-asl-new.yaml)
+normalization:
+  method: "grouped_bbox"
+  groups:
+    - name: "pose"
+      indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+      description: "Upper body pose - normalize by pose bounding box"
+    
+    - name: "left_hand"
+      indices: [23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43]
+      description: "Left hand - normalize by left hand bounding box"
+    
+    - name: "right_hand"
+      indices: [44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64]
+      description: "Right hand - normalize by right hand bounding box"
+    
+    - name: "face"
+      indices: [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89]
+      description: "Face - normalize by face bounding box"
+
+# Evaluation
+evaluation:
+  metrics:
+    - "accuracy"
+    - "top5_accuracy"
+  test_split: 0.2
+  validation_split: 0.2
+
+# Comparison with original paper
+original_paper:
+  architecture: "75 keypoints × 3 coords = 225 features"
+  our_adaptation: "90 keypoints × 2 coords = 180 features"
+  difference: "Using 2D landmarks instead of 3D, more keypoints (90 vs 75)"
+

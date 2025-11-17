@@ -1,0 +1,25 @@
+# TensorFlow SignBART Requirements
+
+# Core dependencies
+tensorflow>=2.12.0,<2.16.0
+numpy>=1.23.0,<2.0.0
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# For data processing
+opencv-python>=4.7.0
+pillow>=9.5.0
+
+# For logging and monitoring
+tensorboard>=2.12.0
+
+# For plotting training curves
+matplotlib>=3.7.0
+
+# Optional: for better performance
+tensorflow-addons>=0.21.0  # If using custom optimizers
+
+# Note: For Apple Silicon Macs, use:
+# tensorflow-macos>=2.12.0
+# tensorflow-metal>=0.8.0
+

@@ -1,0 +1,79 @@
+# SignBART TensorFlow Configuration Example
+# This is a template - adjust values based on your dataset and requirements
+
+# ============================================================================
+# Dataset Configuration
+# ============================================================================
+data_root: "/path/to/your/dataset"  # Root directory containing train/val/test splits
+keypoint_config: "full_100"         # Options: hands_only, pose_hands, full_75, full_100
+num_labels: 64                      # Number of sign language classes
+
+# ============================================================================
+# Model Architecture
+# ============================================================================
+d_model: 256                        # Model dimension (embedding size)
+max_position_embeddings: 512        # Maximum sequence length
+
+# Encoder configuration
+encoder_layers: 6                   # Number of encoder layers
+encoder_attention_heads: 8          # Number of attention heads in encoder
+encoder_ffn_dim: 1024              # Feed-forward network dimension in encoder
+
+# Decoder configuration
+decoder_layers: 6                   # Number of decoder layers
+decoder_attention_heads: 8          # Number of attention heads in decoder
+decoder_ffn_dim: 1024              # Feed-forward network dimension in decoder
+
+# ============================================================================
+# Regularization
+# ============================================================================
+dropout: 0.1                        # General dropout rate
+attention_dropout: 0.1              # Dropout in attention layers
+activation_dropout: 0.1             # Dropout after activation functions
+classifier_dropout: 0.1             # Dropout in classification head
+encoder_layerdrop: 0.0              # Layer dropout for encoder (0.0 = disabled)
+decoder_layerdrop: 0.0              # Layer dropout for decoder (0.0 = disabled)
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+batch_size: 16                      # Batch size (adjust based on GPU memory)
+epochs: 100                         # Number of training epochs
+learning_rate: 0.0001              # Initial learning rate
+optimizer: "adamw"                  # Optimizer: adam or adamw
+weight_decay: 0.01                  # Weight decay for regularization
+augment: true                       # Enable data augmentation
+
+# ============================================================================
+# Paths and Logging
+# ============================================================================
+checkpoint_dir: "checkpoints"       # Directory to save model checkpoints
+log_dir: "logs"                    # Directory for training logs
+save_every: 5                       # Save checkpoint every N epochs
+
+# ============================================================================
+# Notes:
+# ============================================================================
+# 
+# Keypoint configurations:
+#   - hands_only: 42 keypoints (both hands only)
+#   - pose_hands: 48 keypoints (upper body + hands)
+#   - full_75: 75 keypoints (full body + hands)
+#   - full_100: 100 keypoints (full body + hands + face)
+#
+# Model size vs. performance:
+#   - Larger d_model and ffn_dim = better accuracy but slower
+#   - More layers = better accuracy but slower
+#   - More attention heads = better for complex patterns
+#
+# Training tips:
+#   - Start with batch_size=16, adjust based on GPU memory
+#   - Use adamw optimizer for better generalization
+#   - Enable augmentation for small datasets
+#   - Monitor both train and validation metrics
+#
+# For mobile deployment:
+#   - Use smaller d_model (128-256) for faster inference
+#   - Reduce number of layers (3-6) for smaller model
+#   - Consider float16 or int8 quantization
+
