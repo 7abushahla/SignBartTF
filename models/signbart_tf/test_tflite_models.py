@@ -22,7 +22,7 @@ from dataset import SignDataset
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Compare FP32 vs dynamic-range INT8 TFLite models on accuracy."
+        description="Compare FP32 vs PTQ vs QAT TFLite models on accuracy."
     )
     parser.add_argument("--config_path", type=str, required=True,
                         help="Path to model config YAML (unused but kept for parity)")
@@ -30,8 +30,10 @@ def parse_args():
                         help="Path to processed LOSO data split (e.g., *_LOSO_user01)")
     parser.add_argument("--fp32_tflite", type=str, required=True,
                         help="Path to FP32 TFLite model (final_model_fp32.tflite)")
-    parser.add_argument("--dynamic_tflite", type=str, required=True,
-                        help="Path to dynamic-range TFLite model")
+    parser.add_argument("--ptq_tflite", type=str, required=True,
+                        help="Path to PTQ dynamic-range TFLite model")
+    parser.add_argument("--qat_tflite", type=str, default=None,
+                        help="Optional path to QAT dynamic-range TFLite model")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Maximum number of test samples to evaluate (default: all)")
     parser.add_argument("--seed", type=int, default=42,
@@ -157,27 +159,37 @@ def main():
     dataset = load_test_dataset(args.data_path, joint_groups, args.max_samples)
     print(f"[DATA] Loaded {len(dataset.list_key)} test samples from {args.data_path}")
 
-    print("\n[FP32] Evaluating FP32 TFLite model...")
-    fp32_top1, fp32_top5, fp32_time, fp32_size = evaluate_tflite(args.fp32_tflite, dataset, max_seq_len)
-    print(f"  Top-1 Accuracy: {fp32_top1:.4f} ({fp32_top1*100:.2f}%)")
-    print(f"  Top-5 Accuracy: {fp32_top5:.4f} ({fp32_top5*100:.2f}%)")
-    print(f"  Inference time (total): {fp32_time:.2f} seconds")
-    print(f"  File size: {fp32_size:.2f} MB")
+    results = []
 
-    print("\n[INT8] Evaluating dynamic-range TFLite model...")
-    int8_top1, int8_top5, int8_time, int8_size = evaluate_tflite(args.dynamic_tflite, dataset, max_seq_len)
-    print(f"  Top-1 Accuracy: {int8_top1:.4f} ({int8_top1*100:.2f}%)")
-    print(f"  Top-5 Accuracy: {int8_top5:.4f} ({int8_top5*100:.2f}%)")
-    print(f"  Inference time (total): {int8_time:.2f} seconds")
-    print(f"  File size: {int8_size:.2f} MB")
+    print("\n[FP32] Evaluating FP32 TFLite model...")
+    fp32 = evaluate_tflite(args.fp32_tflite, dataset, max_seq_len)
+    results.append(("FP32", args.fp32_tflite, *fp32))
+    print(f"  Top-1 Accuracy: {fp32[0]:.4f} ({fp32[0]*100:.2f}%)")
+    print(f"  Top-5 Accuracy: {fp32[1]:.4f} ({fp32[1]*100:.2f}%)")
+    print(f"  Inference time (total): {fp32[2]:.2f} seconds")
+    print(f"  File size: {fp32[3]:.2f} MB")
+
+    print("\n[PTQ] Evaluating dynamic-range TFLite model...")
+    ptq = evaluate_tflite(args.ptq_tflite, dataset, max_seq_len)
+    results.append(("PTQ", args.ptq_tflite, *ptq))
+    print(f"  Top-1 Accuracy: {ptq[0]:.4f} ({ptq[0]*100:.2f}%)")
+    print(f"  Top-5 Accuracy: {ptq[1]:.4f} ({ptq[1]*100:.2f}%)")
+    print(f"  Inference time (total): {ptq[2]:.2f} seconds")
+    print(f"  File size: {ptq[3]:.2f} MB")
+
+    if args.qat_tflite:
+        print("\n[QAT] Evaluating QAT dynamic-range TFLite model...")
+        qat = evaluate_tflite(args.qat_tflite, dataset, max_seq_len)
+        results.append(("QAT", args.qat_tflite, *qat))
+        print(f"  Top-1 Accuracy: {qat[0]:.4f} ({qat[0]*100:.2f}%)")
+        print(f"  Top-5 Accuracy: {qat[1]:.4f} ({qat[1]*100:.2f}%)")
+        print(f"  Inference time (total): {qat[2]:.2f} seconds")
+        print(f"  File size: {qat[3]:.2f} MB")
 
     print("\n[SUMMARY]")
-    print(f"  FP32 TFLite  : {args.fp32_tflite}")
-    print(f"  Dynamic TFLite: {args.dynamic_tflite}")
-    print(f"  Δ Top-1: {(int8_top1 - fp32_top1) * 100:.2f} percentage points")
-    print(f"  Δ Top-5: {(int8_top5 - fp32_top5) * 100:.2f} percentage points")
-    print(f"  Δ File size: {fp32_size - int8_size:+.2f} MB")
-    print(f"  Δ Inference time: {int8_time - fp32_time:+.2f} seconds")
+    for tag, path, top1, top5, runtime, size in results:
+        print(f"  {tag:<4} | Top-1 {top1*100:6.2f}% | Top-5 {top5*100:6.2f}% | "
+              f"Time {runtime:6.2f}s | Size {size:5.2f} MB | {path}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""
+train_loso_functional_qat_batch.py
+
+Batch QAT fine-tuning for all LOSO models.
+Automatically runs QAT for all 3 LOSO splits (user01, user08, user11).
+
+This script:
+1. Loops through each LOSO user
+2. Loads the trained model from checkpoints_arabic_asl_LOSO_userXX/final_model.h5
+3. Applies QAT annotation and fine-tunes for N epochs
+4. Exports dynamic-range INT8 TFLite model
+5. Optionally evaluates the TFLite model
+
+Example:
+    python train_loso_functional_qat_batch.py \
+        --config_path configs/arabic-asl-90kpts.yaml \
+        --base_data_path ~/signbart_tf/data/arabic-asl-90kpts \
+        --qat_epochs 3 \
+        --batch_size 1 \
+        --lr 5e-5 \
+        --seed 42
+"""
+import argparse
+import os
+import sys
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+# LOSO test users - matches train_loso.py configuration
+LOSO_USERS = ["user01", "user08", "user11"]
+EXPERIMENT_PREFIX = "arabic_asl_LOSO_"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Batch QAT fine-tuning for all LOSO models",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Example usage:
+  # Run QAT for all 3 LOSO models:
+  python train_loso_functional_qat_batch.py \\
+      --config_path configs/arabic-asl-90kpts.yaml \\
+      --base_data_path ~/signbart_tf/data/arabic-asl-90kpts \\
+      --qat_epochs 3 \\
+      --batch_size 1 \\
+      --lr 5e-5
+
+  # Test with single user first:
+  python train_loso_functional_qat_batch.py \\
+      --config_path configs/arabic-asl-90kpts.yaml \\
+      --base_data_path ~/signbart_tf/data/arabic-asl-90kpts \\
+      --holdout_only user01 \\
+      --qat_epochs 1
+        """
+    )
+    parser.add_argument("--config_path", type=str, required=True,
+                        help="Path to model config YAML")
+    parser.add_argument("--base_data_path", type=str, required=True,
+                        help="Base path to processed data (without _LOSO suffix)")
+    parser.add_argument("--qat_epochs", type=int, default=3,
+                        help="Number of QAT fine-tuning epochs")
+    parser.add_argument("--batch_size", type=int, default=1,
+                        help="Batch size for QAT training")
+    parser.add_argument("--lr", type=float, default=5e-5,
+                        help="Learning rate for QAT fine-tuning")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed")
+    parser.add_argument("--holdout_only", type=str, default="",
+                        help="Run QAT only for specific user (e.g., 'user01') - USE THIS TO TEST FIRST!")
+    parser.add_argument("--output_base_dir", type=str, default="exports/qat_loso",
+                        help="Base directory for QAT outputs (will create subdirs per user)")
+    parser.add_argument("--quantize_dense_names", nargs="*", default=None,
+                        help="Dense layer name substrings to quantize (default: fc1,fc2,proj,q_proj,k_proj,v_proj,out_proj)")
+    parser.add_argument("--skip_tflite_eval", action="store_true",
+                        help="Skip TFLite model evaluation after export")
+    return parser.parse_args()
+
+
+def check_prerequisites(base_data_path, user):
+    """Check if required files exist for a LOSO user."""
+    data_path = f"{base_data_path}_LOSO_{user}"
+    checkpoint_path = f"checkpoints_{EXPERIMENT_PREFIX}{user}/final_model.h5"
+    
+    missing = []
+    if not os.path.exists(data_path):
+        missing.append(f"Data directory: {data_path}")
+    if not os.path.exists(checkpoint_path):
+        missing.append(f"Checkpoint: {checkpoint_path}")
+    
+    return missing
+
+
+def run_qat_for_user(args, user):
+    """Run QAT fine-tuning for a single LOSO user."""
+    print(f"\n{'#'*80}")
+    print(f"# QAT Fine-tuning for {user.upper()}")
+    print(f"{'#'*80}\n")
+    
+    # Check prerequisites
+    missing = check_prerequisites(args.base_data_path, user)
+    if missing:
+        print(f"✗ Missing prerequisites for {user}:")
+        for item in missing:
+            print(f"  - {item}")
+        print(f"  Skipping {user}...\n")
+        return False
+    
+    # Set up paths
+    data_path = f"{args.base_data_path}_LOSO_{user}"
+    checkpoint_path = f"checkpoints_{EXPERIMENT_PREFIX}{user}/final_model.h5"
+    output_dir = f"{args.output_base_dir}/{user}"
+    
+    print(f"[INFO] User: {user}")
+    print(f"  Data path: {data_path}")
+    print(f"  Checkpoint: {checkpoint_path}")
+    print(f"  Output dir: {output_dir}")
+    print()
+    
+    # Build command to run train_loso_functional_qat.py
+    cmd = [
+        sys.executable,
+        "train_loso_functional_qat.py",
+        "--config_path", args.config_path,
+        "--data_path", data_path,
+        "--checkpoint", checkpoint_path,
+        "--output_dir", output_dir,
+        "--batch_size", str(args.batch_size),
+        "--qat_epochs", str(args.qat_epochs),
+        "--lr", str(args.lr),
+        "--seed", str(args.seed),
+    ]
+    
+    if args.quantize_dense_names:
+        cmd.extend(["--quantize_dense_names"] + args.quantize_dense_names)
+    
+    print(f"[RUN] Executing QAT for {user}...")
+    print(f"Command: {' '.join(cmd)}")
+    print()
+    
+    start_time = datetime.now()
+    result = subprocess.run(cmd)
+    end_time = datetime.now()
+    
+    success = result.returncode == 0
+    duration = (end_time - start_time).total_seconds()
+    
+    if success:
+        print(f"\n✓ QAT completed for {user} in {duration:.1f} seconds")
+        
+        # Check if outputs were created
+        qat_model_path = f"{output_dir}/qat_model.keras"
+        tflite_path = f"{output_dir}/qat_dynamic_int8.tflite"
+        
+        outputs_ok = True
+        if not os.path.exists(qat_model_path):
+            print(f"  ⚠️  Warning: QAT model not found at {qat_model_path}")
+            outputs_ok = False
+        if not os.path.exists(tflite_path):
+            print(f"  ⚠️  Warning: TFLite model not found at {tflite_path}")
+            outputs_ok = False
+        
+        if outputs_ok:
+            tflite_size_mb = os.path.getsize(tflite_path) / (1024**2)
+            print(f"  ✓ QAT model: {qat_model_path}")
+            print(f"  ✓ TFLite model: {tflite_path} ({tflite_size_mb:.2f} MB)")
+    else:
+        print(f"\n✗ QAT failed for {user} after {duration:.1f} seconds")
+    
+    print()
+    return success
+
+
+def main():
+    args = parse_args()
+    
+    # Filter users if holdout_only specified
+    users_to_run = LOSO_USERS
+    if args.holdout_only:
+        if args.holdout_only not in LOSO_USERS:
+            print(f"ERROR: Invalid user '{args.holdout_only}'")
+            print(f"Valid options: {', '.join(LOSO_USERS)}")
+            sys.exit(1)
+        users_to_run = [args.holdout_only]
+        print(f"[INFO] TESTING MODE: Running QAT only for {args.holdout_only}")
+        print(f"       Once this works, remove --holdout_only to run all 3 LOSO models\n")
+    
+    print("="*80)
+    print("BATCH QAT FINE-TUNING FOR LOSO MODELS")
+    print("="*80)
+    print(f"Config: {args.config_path}")
+    print(f"Base data path: {args.base_data_path}")
+    print(f"QAT epochs: {args.qat_epochs}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Learning rate: {args.lr}")
+    print(f"Seed: {args.seed}")
+    print(f"Output base dir: {args.output_base_dir}")
+    print(f"Users to process: {len(users_to_run)} ({', '.join(users_to_run)})")
+    print("="*80)
+    print()
+    
+    # Check if train_loso_functional_qat.py exists
+    if not os.path.exists("train_loso_functional_qat.py"):
+        print("ERROR: train_loso_functional_qat.py not found in current directory")
+        print("Please run this script from the signbart_tf directory")
+        sys.exit(1)
+    
+    results = []
+    for i, user in enumerate(users_to_run, 1):
+        print(f"\n{'='*80}")
+        print(f"Processing {i}/{len(users_to_run)}: {user.upper()}")
+        print(f"{'='*80}")
+        
+        success = run_qat_for_user(args, user)
+        results.append({
+            "user": user,
+            "success": success
+        })
+    
+    # Print summary
+    print("\n" + "="*80)
+    print("BATCH QAT SUMMARY")
+    print("="*80)
+    
+    successful = [r for r in results if r["success"]]
+    failed = [r for r in results if not r["success"]]
+    
+    print(f"\nSuccessful: {len(successful)}/{len(results)}")
+    for r in successful:
+        print(f"  ✓ {r['user']}")
+    
+    if failed:
+        print(f"\nFailed: {len(failed)}/{len(results)}")
+        for r in failed:
+            print(f"  ✗ {r['user']}")
+    
+    print("\n" + "="*80)
+    print("Output directories:")
+    for user in users_to_run:
+        output_dir = f"{args.output_base_dir}/{user}"
+        print(f"  {user}: {output_dir}/")
+        if os.path.exists(f"{output_dir}/qat_dynamic_int8.tflite"):
+            size_mb = os.path.getsize(f"{output_dir}/qat_dynamic_int8.tflite") / (1024**2)
+            print(f"    - qat_dynamic_int8.tflite ({size_mb:.2f} MB)")
+        if os.path.exists(f"{output_dir}/qat_model.keras"):
+            print(f"    - qat_model.keras")
+    
+    print("="*80)
+    
+    if len(successful) == len(results):
+        print("\n✓ All QAT fine-tuning completed successfully!")
+        if args.holdout_only:
+            print("\nNext steps:")
+            print(f"  1. Check results in {args.output_base_dir}/{args.holdout_only}/")
+            print(f"  2. If satisfied, run for all users:")
+            print(f"     python train_loso_functional_qat_batch.py \\")
+            print(f"         --config_path {args.config_path} \\")
+            print(f"         --base_data_path {args.base_data_path} \\")
+            print(f"         --qat_epochs {args.qat_epochs}")
+            print(f"     (Remove --holdout_only flag)")
+    else:
+        print(f"\n⚠️  Some QAT runs failed. Check logs above for details.")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+

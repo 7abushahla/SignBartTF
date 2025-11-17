@@ -22,17 +22,12 @@ from pathlib import Path
 from datetime import datetime
 import tensorflow as tf
 
-# Define LOSO configurations - includes 4 users
+# Define LOSO configurations - includes 3 users
 LOSO_CONFIGS = [
     {
         "holdout_user": "user01",
         "train_users": "user02-user12",
         "experiment_name": "arabic_asl_LOSO_user01"
-    },
-    {
-        "holdout_user": "user02",
-        "train_users": "user01,user03-12",
-        "experiment_name": "arabic_asl_LOSO_user02"
     },
     {
         "holdout_user": "user08",
@@ -320,7 +315,7 @@ def main():
         sys.exit(1)
     
     print(f"\n{'='*80}")
-    print(f"Arabic ASL LOSO Training (TensorFlow) - 4 users")
+    print(f"Arabic ASL LOSO Training (TensorFlow) - 3 users")
     print(f"{'='*80}")
     print(f"Config: {args.config_path}")
     print(f"Base data path: {args.base_data_path}")
@@ -348,10 +343,10 @@ def main():
         configs_to_run = [c for c in LOSO_CONFIGS if c["holdout_user"] == args.holdout_only]
         if not configs_to_run:
             print(f"ERROR: Invalid holdout user: {args.holdout_only}")
-            print(f"Valid options: user01, user02, user08, user11")
+            print(f"Valid options: user01, user08, user11")
             sys.exit(1)
         print(f"[ℹ] TESTING MODE: Running only {args.holdout_only}")
-        print(f"    Once this works, remove --holdout_only to run all 4 LOSO experiments\n")
+        print(f"    Once this works, remove --holdout_only to run all 3 LOSO experiments\n")
     
     results = []
     

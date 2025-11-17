@@ -130,31 +130,29 @@ def load_model(config_path, pretrained_path):
     return model, config
 
 
+def format_batch_for_functional(batch):
+    inputs = {
+        'keypoints': batch['keypoints'],
+        'attention_mask': batch['attention_mask']
+    }
+    labels = batch['labels']
+    return inputs, labels
+
+
 def prepare_data_loaders(data_path, joint_idx, batch_size=1, no_validation=False):
     """Prepare training and validation data loaders."""
     train_datasets = SignDataset(data_path, "train", shuffle=True, joint_idxs=joint_idx, augment=True)
     train_loader_raw = train_datasets.create_tf_dataset(batch_size, drop_remainder=False)
-    
-    # Transform dataset to separate inputs and labels for functional model
-    # Functional models expect (inputs, labels) format, not dict with labels inside
-    def separate_labels(batch):
-        """Separate labels from inputs for functional model."""
-        inputs = {
-            'keypoints': batch['keypoints'],
-            'attention_mask': batch['attention_mask']
-        }
-        labels = batch['labels']
-        return inputs, labels
-    
-    train_loader = train_loader_raw.map(separate_labels)
-    
+
+    train_loader = train_loader_raw.map(format_batch_for_functional)
+
     if no_validation:
         return train_loader, None, train_datasets
-    
+
     val_datasets = SignDataset(data_path, "test", shuffle=False, joint_idxs=joint_idx, augment=False)
     val_loader_raw = val_datasets.create_tf_dataset(batch_size, drop_remainder=False)
-    val_loader = val_loader_raw.map(separate_labels)
-    
+    val_loader = val_loader_raw.map(format_batch_for_functional)
+
     return train_loader, val_loader, train_datasets
 
 
@@ -286,6 +284,11 @@ def main(args):
     train_loader, val_loader, train_datasets = prepare_data_loaders(
         args.data_path, joint_idx, batch_size, args.no_validation
     )
+    eval_loader = val_loader
+    if eval_loader is None:
+        eval_dataset = SignDataset(args.data_path, "test", shuffle=False, joint_idxs=joint_idx, augment=False)
+        eval_loader_raw = eval_dataset.create_tf_dataset(batch_size, drop_remainder=False)
+        eval_loader = eval_loader_raw.map(format_batch_for_functional)
     
     # Setup optimizer
     optimizer = keras.optimizers.AdamW(learning_rate=args.lr, weight_decay=config.get('weight_decay', 0.01))
@@ -452,8 +455,8 @@ def main(args):
     
     # Evaluation mode
     if args.task == "eval":
-        if val_loader is None:
-            print("ERROR: Cannot evaluate without validation data. Remove --no_validation flag.")
+        if eval_loader is None:
+            print("ERROR: Cannot evaluate without evaluation data.")
             return
         
         # Load checkpoint for evaluation
@@ -491,7 +494,7 @@ def main(args):
         
         print("\nEvaluate model..!")
         start_time = time.time()
-        results = model.evaluate(val_loader, return_dict=True, verbose=1)
+        results = model.evaluate(eval_loader, return_dict=True, verbose=1)
         inference_time = time.time() - start_time
         
         print(f"\n{'='*80}")
@@ -590,10 +593,10 @@ def main(args):
         print(f"  File size: {tflite_size_mb:.2f} MB")
         
         # Evaluate both Keras and TFLite models on full test/validation set
-        if val_loader is not None:
+        if eval_loader is not None:
             print("\n2. Evaluating Keras model on test set...")
             keras_start = time.time()
-            keras_results = model.evaluate(val_loader, return_dict=True, verbose=1)
+            keras_results = model.evaluate(eval_loader, return_dict=True, verbose=1)
             keras_time = time.time() - keras_start
             
             print(f"\n  Keras Model Results:")
