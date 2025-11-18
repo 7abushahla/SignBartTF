@@ -1,29 +1,25 @@
-# ML Training Dependencies for Sign Language Recognition
+# TensorFlow SignBART Requirements
 
-# Core ML
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.24.0
-pandas>=2.0.0
-scikit-learn>=1.3.0
-
-# Video Processing
-opencv-python>=4.8.0
-mediapipe>=0.10.0
-
-# Data Handling
+# Core dependencies
+tensorflow>=2.12.0,<2.16.0
+numpy>=1.23.0,<2.0.0
 pyyaml>=6.0
-h5py>=3.9.0
-
-# Visualization
-matplotlib>=3.7.0
-seaborn>=0.12.0
-
-# Training Utilities
-tensorboard>=2.13.0
 tqdm>=4.65.0
 
-# Optional: Jupyter for notebooks
-jupyter>=1.0.0
-ipykernel>=6.25.0
+# For data processing
+opencv-python>=4.7.0
+pillow>=9.5.0
+
+# For logging and monitoring
+tensorboard>=2.12.0
+
+# For plotting training curves
+matplotlib>=3.7.0
+
+# Optional: for better performance
+tensorflow-addons>=0.21.0  # If using custom optimizers
+
+# Note: For Apple Silicon Macs, use:
+# tensorflow-macos>=2.12.0
+# tensorflow-metal>=0.8.0
 
