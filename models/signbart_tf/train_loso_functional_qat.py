@@ -42,7 +42,9 @@ MAX_SEQ_LEN = 64
 class Top5Accuracy(keras.metrics.SparseTopKCategoricalAccuracy):
     """Top-5 accuracy metric using Keras built-in."""
     def __init__(self, name="top5_accuracy", **kwargs):
-        super().__init__(k=5, name=name, **kwargs)
+        # Extract k from kwargs to avoid duplicate argument error
+        k = kwargs.pop('k', 5)
+        super().__init__(k=k, name=name, **kwargs)
 
 
 def parse_args():
@@ -411,10 +413,35 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    
     print("[DATA] Preparing datasets...")
-    train_ds = create_dataset(args.data_path, joint_groups, args.batch_size, "train", augment=True)
-    test_ds = create_dataset(args.data_path, joint_groups, args.batch_size, "test", augment=False)
+    # Detect dataset layout:
+    # - LOSO layout: {data_path}/train, {data_path}/test
+    # - Full-data layout: {data_path}/all only (no explicit train/test)
+    train_dir = os.path.join(args.data_path, "train")
+    test_dir = os.path.join(args.data_path, "test")
+    all_dir = os.path.join(args.data_path, "all")
+    
+    if os.path.isdir(train_dir):
+        # Standard LOSO case
+        train_split = "train"
+        test_split = "test"
+        print(f"  Using LOSO splits: train='{train_split}', test='{test_split}'")
+    elif os.path.isdir(all_dir):
+        # Full-dataset case (all users in one split)
+        train_split = "all"
+        test_split = None
+        print("  Detected full-dataset layout (using 'all' split for QAT training, no dedicated test split).")
+    else:
+        raise FileNotFoundError(
+            f"Could not find expected splits under {args.data_path}. "
+            f"Looked for 'train'/'test' or 'all' directories."
+        )
+    
+    train_ds = create_dataset(args.data_path, joint_groups, args.batch_size, train_split, augment=True)
+    test_ds = None
+    if test_split is not None:
+        test_ds = create_dataset(args.data_path, joint_groups, args.batch_size, test_split, augment=False)
 
     print(f"[LOAD] Loading base model from {args.checkpoint}")
     custom_objects = get_custom_objects()
@@ -557,16 +584,20 @@ def main():
     
     history = qat_model.fit(
         train_ds,
-        validation_data=None if args.no_validation else test_ds,
+        validation_data=None if (args.no_validation or test_ds is None) else test_ds,
         epochs=args.qat_epochs,
         verbose=1,
         callbacks=callbacks
     )
-
-    print("\n[EVAL] Evaluating QAT model on test set...")
-    results = qat_model.evaluate(test_ds, return_dict=True)
-    for k, v in results.items():
-        print(f"  {k}: {v:.4f}")
+    
+    # Final evaluation (only if we have a proper test set)
+    if test_ds is not None:
+        print("\n[EVAL] Evaluating QAT model on test set...")
+        results = qat_model.evaluate(test_ds, return_dict=True)
+        for k, v in results.items():
+            print(f"  {k}: {v:.4f}")
+    else:
+        print("\n[EVAL] Skipping final test evaluation (no 'test' split available).")
 
     qat_path = output_dir / "qat_model.keras"
     qat_model.save(qat_path)
