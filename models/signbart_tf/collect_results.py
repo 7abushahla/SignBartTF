@@ -29,6 +29,10 @@ import argparse
 import time
 from pathlib import Path
 from datetime import datetime
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for server environments
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from dataset import SignDataset
 from model_functional import build_signbart_functional_with_dict_inputs
@@ -95,6 +99,115 @@ class DualWriter:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+def save_confusion_matrix(all_labels, all_preds, user, model_type, output_dir="results/confusion_matrices"):
+    """
+    Generate and save confusion matrix as PNG.
+    
+    Args:
+        all_labels: True labels (numpy array)
+        all_preds: Predicted labels (numpy array)
+        user: Test user ID (e.g., 'user11')
+        model_type: Model type ('FP32', 'INT8-QAT', 'INT8-PTQ')
+        output_dir: Directory to save confusion matrices
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create confusion matrix
+    num_classes = len(GESTURE_CLASSES)
+    confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
+    for true_label, pred_label in zip(all_labels, all_preds):
+        confusion_matrix[true_label, pred_label] += 1
+    
+    # Create figure
+    plt.figure(figsize=(10, 8))
+    
+    # Plot with seaborn heatmap
+    sns.heatmap(
+        confusion_matrix,
+        annot=True,
+        fmt='d',
+        cmap='Blues',
+        xticklabels=GESTURE_CLASSES,
+        yticklabels=GESTURE_CLASSES,
+        cbar_kws={'label': 'Count'},
+        square=True
+    )
+    
+    # Labels and title
+    plt.xlabel('Predicted Gesture', fontsize=12, fontweight='bold')
+    plt.ylabel('True Gesture', fontsize=12, fontweight='bold')
+    plt.title(f'Confusion Matrix - Test Subject: {user.upper()} ({model_type})', 
+              fontsize=14, fontweight='bold', pad=20)
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    # Save figure
+    filename = f"confusion_matrix_{user}_{model_type.replace('-', '_')}.png"
+    filepath = os.path.join(output_dir, filename)
+    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  ✓ Confusion matrix saved: {filepath}")
+    
+    return confusion_matrix
+
+
+def calculate_flops(model, input_shape=(1, 64, 9, 2)):
+    """
+    Calculate FLOPs for a Keras model using TensorFlow profiler.
+    
+    Args:
+        model: Keras model
+        input_shape: Input shape for keypoints (batch, seq_len, num_keypoints, 2)
+    
+    Returns:
+        int: Total FLOPs (floating-point operations)
+    """
+    try:
+        # Create a forward pass function
+        @tf.function
+        def forward_pass():
+            dummy_keypoints = tf.random.normal(input_shape)
+            dummy_mask = tf.ones((input_shape[0], input_shape[1]))
+            inputs = {
+                'keypoints': dummy_keypoints,
+                'attention_mask': dummy_mask
+            }
+            return model(inputs, training=False)
+        
+        # Get the concrete function
+        concrete_func = forward_pass.get_concrete_function()
+        
+        # Run profiler
+        from tensorflow.python.profiler.model_analyzer import profile
+        from tensorflow.python.profiler.option_builder import ProfileOptionBuilder
+        
+        # Profile the graph
+        graph = concrete_func.graph
+        run_meta = tf.compat.v1.RunMetadata()
+        opts = ProfileOptionBuilder.float_operation()
+        
+        flops = tf.compat.v1.profiler.profile(
+            graph=graph,
+            run_meta=run_meta,
+            options=opts
+        )
+        
+        return flops.total_float_ops
+        
+    except Exception as e:
+        print(f"  ⚠️  Warning: Could not calculate FLOPs: {e}")
+        # Fallback: Try alternative method
+        try:
+            # Alternative method using keras-flops package if available
+            import keras_flops
+            flops = keras_flops.get_flops(model, batch_size=1)
+            return flops
+        except:
+            return None
 
 
 def load_config(config_path="configs/arabic-asl.yaml"):
@@ -292,6 +405,12 @@ def evaluate_tflite_model(tflite_path, data_path, config, user, model_type="TFLi
             class_name = f"G{class_idx+1:02d}"
             per_class_acc[class_name] = class_acc
         
+        # Generate and save confusion matrix
+        try:
+            save_confusion_matrix(all_labels, all_preds, user, model_type)
+        except Exception as e:
+            print(f"  ⚠️  Warning: Could not generate confusion matrix: {e}")
+        
         # Get file size
         file_size_mb = os.path.getsize(tflite_path) / (1024**2)
         
@@ -396,6 +515,21 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         traceback.print_exc()
         return None
     
+    # Calculate FLOPs
+    print(f"  Calculating FLOPs...")
+    num_keypoints = len(config['joint_idx'])
+    input_shape = (1, 64, num_keypoints, 2)  # (batch, seq_len, keypoints, coords)
+    flops = calculate_flops(model, input_shape)
+    if flops:
+        flops_millions = flops / 1e6
+        flops_billions = flops / 1e9
+        if flops_billions >= 1.0:
+            print(f"  ✓ Model FLOPs: {flops_billions:.2f} GFLOPs ({flops:,} FLOPs)")
+        else:
+            print(f"  ✓ Model FLOPs: {flops_millions:.2f} MFLOPs ({flops:,} FLOPs)")
+    else:
+        print(f"  ⚠️  Could not calculate FLOPs")
+    
     # Load test dataset
     print(f"  Loading test dataset...")
     try:
@@ -465,6 +599,9 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         
         print(f"  ✓ Per-class accuracies collected")
         
+        # NOTE: Confusion matrix is NOT generated for .h5 checkpoint evaluation
+        # Only TFLite evaluations generate confusion matrices (FP32, INT8-QAT, INT8-PTQ)
+        
     except Exception as e:
         print(f"  ⚠️  Warning: Could not collect per-class accuracies: {e}")
     
@@ -494,7 +631,8 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         'evaluated_from_checkpoint': True,
         'checkpoint_used': checkpoint_file,
         'file_size_mb': checkpoint_size_mb,
-        'model_path': checkpoint_path
+        'model_path': checkpoint_path,
+        'flops': flops  # Add FLOPs to results
     }
     
     print(f"\n  Results:")
@@ -503,6 +641,9 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
     print(f"    Test Loss: {results_dict['test_loss']:.4f}")
     print(f"    Inference Time: {inference_time:.2f}s")
     print(f"    Time per sample: {results_dict['time_per_sample']*1000:.2f}ms")
+    if flops:
+        flops_b = flops / 1e9
+        print(f"    FLOPs: {flops_b:.2f} GFLOPs")
     print(f"{'='*80}\n")
     
     return results_dict
@@ -720,6 +861,45 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
             row += "\n"
             f.write(row)
     
+    # Model information table (parameters, FLOPs)
+    model_info_file = os.path.join(output_dir, "model_info.csv")
+    with open(model_info_file, 'w') as f:
+        f.write("Metric,Value,Unit\n")
+        
+        # Get FLOPs from results
+        flops_value = None
+        for user_results in all_results.values():
+            if user_results.get('flops'):
+                flops_value = user_results['flops']
+                break
+        
+        # Count parameters (build model once)
+        try:
+            from model_functional import build_signbart_functional_with_dict_inputs
+            import yaml
+            config_path = "configs/arabic-asl.yaml"
+            with open(config_path, 'r') as cfg_f:
+                config = yaml.safe_load(cfg_f)
+            
+            model = build_signbart_functional_with_dict_inputs(config)
+            total_params = model.count_params()
+            trainable_params = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
+            
+            f.write(f"Total Parameters,{total_params:,},params\n")
+            f.write(f"Trainable Parameters,{trainable_params:,},params\n")
+            f.write(f"Model Size (FP32),{total_params * 4 / (1024**2):.2f},MB\n")
+        except Exception as e:
+            print(f"  ⚠️  Warning: Could not count parameters for CSV: {e}")
+        
+        if flops_value:
+            f.write(f"FLOPs (Forward Pass),{flops_value:,},FLOPs\n")
+            f.write(f"FLOPs (Forward Pass),{flops_value / 1e6:.2f},MFLOPs\n")
+            f.write(f"FLOPs (Forward Pass),{flops_value / 1e9:.2f},GFLOPs\n")
+        else:
+            f.write(f"FLOPs (Forward Pass),Not calculated,N/A\n")
+    
+    print(f"  ✓ Model info saved: {model_info_file}")
+    
     # Per-class accuracy table
     has_per_class = any(r.get('per_class_acc') for r in all_results.values())
     if has_per_class:
@@ -924,6 +1104,11 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         writer.writeln(f"Model size: {params['size_mb']:.2f} MB (FP32)")
         writer.writeln()
         
+        # FLOPs will be calculated and shown after model evaluation
+        writer.writeln("Computational Complexity:")
+        writer.writeln(f"  FLOPs: (will be calculated during model evaluation)")
+        writer.writeln()
+        
         # 4. Results per Test Signer
         writer.writeln("4. RECOGNITION ACCURACY PER TEST SIGNER")
         writer.writeln("-" * 80)
@@ -1022,7 +1207,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             
             if os.path.exists(fp32_tflite_path):
                 if run_evaluation:
-                    fp32_tflite_result = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32-TFLite")
+                    fp32_tflite_result = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32")
                     if fp32_tflite_result:
                         fp32_tflite_results[user] = fp32_tflite_result
                         fp32_tflite_results_global[user] = fp32_tflite_result
@@ -1060,7 +1245,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             
             if os.path.exists(ptq_path):
                 if run_evaluation:
-                    ptq_result = evaluate_tflite_model(ptq_path, loso_data_path, config, user, "PTQ")
+                    ptq_result = evaluate_tflite_model(ptq_path, loso_data_path, config, user, "INT8-PTQ")
                     if ptq_result:
                         ptq_results[user] = ptq_result
                         ptq_results_global[user] = ptq_result
@@ -1096,7 +1281,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             
             if os.path.exists(qat_path):
                 if run_evaluation:
-                    qat_result = evaluate_tflite_model(qat_path, loso_data_path, config, user, "QAT")
+                    qat_result = evaluate_tflite_model(qat_path, loso_data_path, config, user, "INT8-QAT")
                     if qat_result:
                         qat_results[user] = qat_result
                         qat_results_global[user] = qat_result
@@ -1237,7 +1422,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                     fp32_size = os.path.getsize(fp32_tflite_path) / (1024**2)
                     # If not evaluated, try to evaluate now for inference time
                     if run_evaluation:
-                        fp32_tflite_result = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32-TFLite")
+                        fp32_tflite_result = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32")
                         if fp32_tflite_result:
                             fp32_tflite_results[user] = fp32_tflite_result
                             fp32_tflite_results_global[user] = fp32_tflite_result
@@ -1264,7 +1449,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                     ptq_size = os.path.getsize(ptq_path) / (1024**2)
                     # If not evaluated, try to evaluate now for inference time
                     if run_evaluation:
-                        ptq_result = evaluate_tflite_model(ptq_path, loso_data_path, config, user, "PTQ")
+                        ptq_result = evaluate_tflite_model(ptq_path, loso_data_path, config, user, "INT8-PTQ")
                         if ptq_result:
                             ptq_results[user] = ptq_result
                             ptq_results_global[user] = ptq_result
@@ -1282,7 +1467,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                     qat_size = os.path.getsize(qat_path) / (1024**2)
                     # If not evaluated, try to evaluate now for inference time
                     if run_evaluation:
-                        qat_result = evaluate_tflite_model(qat_path, loso_data_path, config, user, "QAT")
+                        qat_result = evaluate_tflite_model(qat_path, loso_data_path, config, user, "INT8-QAT")
                         if qat_result:
                             qat_results[user] = qat_result
                             qat_results_global[user] = qat_result
