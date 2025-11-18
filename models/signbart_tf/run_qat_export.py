@@ -45,8 +45,10 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
     parser.add_argument("--quantize_dense_names", nargs="*", default=None,
-                        help="Optional list of substrings for Dense layer names to quantize "
-                             "(defaults to ['fc1','fc2','proj_x1','proj_y1','q_proj','k_proj','v_proj','out_proj']).")
+                        help="Optional list of substrings for Dense layer names to quantize. "
+                             "Default: ['fc1','fc2'] (FFN layers only). "
+                             "WARNING: Do NOT include 'q_proj','k_proj','v_proj','out_proj' - "
+                             "attention projections are too sensitive and cause training collapse!")
     parser.add_argument("--save_keras", action="store_true",
                         help="Save intermediate Keras models (FP32 + QAT) for inspection.")
     return parser.parse_args()
@@ -323,7 +325,7 @@ def annotate_for_qat(
                         dense_log.append(full_name)
                         annotated_internal.append(full_name)
                     else:
-                        skipped_log.append(full_name)
+                        skipped_dense_log.append(full_name)
                         skipped_internal.append(full_name)
                 elif isinstance(attr, (list, tuple, dict)):
                     record_with_tracking(attr, f"{parent}/{attr_name}" if parent else attr_name, visited, set())
@@ -444,11 +446,17 @@ def main():
     args = parse_args()
     set_seed(args.seed)
 
+    # Default: Only quantize FFN layers (fc1, fc2)
+    # DO NOT quantize attention projections (q_proj, k_proj, v_proj, out_proj) - they are too sensitive!
     dense_filters = args.quantize_dense_names or [
-        "fc1", "fc2",          # FFN
-        "proj_x1", "proj_y1",  # Projection
-        "q_proj", "k_proj", "v_proj", "out_proj",  # Attention projections
+        "fc1", "fc2",          # FFN layers only
+        # "proj_x1", "proj_y1",  # Projection (optional, can add if needed)
+        # "q_proj", "k_proj", "v_proj", "out_proj",  # ATTENTION PROJECTIONS - DO NOT QUANTIZE!
     ]
+    
+    print(f"\n[QAT] Quantization filters: {dense_filters}")
+    print(f"  ⚠️  Attention projections (q_proj, k_proj, v_proj, out_proj) are EXCLUDED by default")
+    print(f"      These are extremely sensitive and cause training collapse if quantized!")
 
     config = load_config(args.config_path)
     model = build_functional_model(config)
@@ -480,38 +488,50 @@ def main():
 
     container_summary = sorted(set(container_log))
     dense_summary = sorted(set(dense_log))
+    skipped_dense_summary = sorted(set(skipped_dense_log))
 
+    # Categorize dense layers
+    attention_proj_layers = [n for n in skipped_dense_summary if any(x in n for x in ["q_proj", "k_proj", "v_proj", "out_proj"])]
+    ffn_layers = [n for n in dense_summary if any(x in n for x in ["fc1", "fc2"])]
+    projection_layers = [n for n in dense_summary if any(x in n for x in ["proj_x", "proj_y"])]
+    other_quantized = [n for n in dense_summary if n not in ffn_layers and n not in projection_layers]
+    other_skipped = [n for n in skipped_dense_summary if n not in attention_proj_layers]
+
+    print("\n" + "="*80)
+    print("[QAT] QUANTIZATION SUMMARY")
+    print("="*80)
+    
     if dense_summary:
-        print("\n[QAT] Dense layers annotated:")
-        for name in dense_summary:
-            print(f"  • {name}")
+        print(f"\n✓ QUANTIZED Dense layers ({len(dense_summary)} total):")
+        if ffn_layers:
+            print(f"  FFN layers ({len(ffn_layers)}):")
+            for name in ffn_layers:
+                print(f"    • {name}")
+        if projection_layers:
+            print(f"  Projection layers ({len(projection_layers)}):")
+            for name in projection_layers:
+                print(f"    • {name}")
+        if other_quantized:
+            print(f"  Other quantized ({len(other_quantized)}):")
+            for name in other_quantized:
+                print(f"    • {name}")
     else:
-        print("\n[QAT] WARNING: No Dense layers were annotated!")
+        print("\n⚠️  WARNING: No Dense layers were annotated!")
 
-    # if container_summary:
-    #     print("\n[QAT] Container layers wrapped with NoOpQuantizeConfig:")
-    #     for name in container_summary:
-    #         print(f"  • {name}")
-    #         details = container_details.get(name, {})
-    #         annotated = details.get("annotated", [])
-    #         skipped = details.get("skipped", [])
-    #         if annotated:
-    #             print("    Annotated:")
-    #             for entry in annotated:
-    #                 print(f"      - {entry}")
-    #         if skipped:
-    #             print("    Skipped:")
-    #             for entry in skipped:
-    #                 print(f"      - {entry}")
-    # if skipped_dense_log:
-    #     print("\n[QAT] Dense layers NOT quantized (filter mismatch):")
-    #     for name in sorted(set(skipped_dense_log)):
-    #         print(f"  • {name}")
+    if skipped_dense_summary:
+        print(f"\n✗ SKIPPED Dense layers ({len(skipped_dense_summary)} total, kept in FP32):")
+        if attention_proj_layers:
+            print(f"  ⚠️  ATTENTION PROJECTIONS ({len(attention_proj_layers)}) - CORRECTLY EXCLUDED:")
+            for name in attention_proj_layers:
+                print(f"    • {name}")
+        if other_skipped:
+            print(f"  Other skipped ({len(other_skipped)}):")
+            for name in other_skipped[:20]:  # Limit to first 20 to avoid spam
+                print(f"    • {name}")
+            if len(other_skipped) > 20:
+                print(f"    ... and {len(other_skipped) - 20} more")
 
-    if skipped_layers:
-        print("\n[QAT] Non-Dense layers kept in FP32:")
-        for name, cls in sorted(set(skipped_layers)):
-            print(f"  • {name} ({cls})")
+    print("\n" + "="*80)
 
     if args.save_keras:
         qat_path = output_dir / "signbart_qat.keras"

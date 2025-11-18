@@ -75,6 +75,14 @@ Example usage:
                         help="Dense layer name substrings to quantize (default: fc1,fc2,proj,q_proj,k_proj,v_proj,out_proj)")
     parser.add_argument("--skip_tflite_eval", action="store_true",
                         help="Skip TFLite model evaluation after export")
+    parser.add_argument("--no_validation", action="store_true",
+                        help="Disable validation during QAT training (monitor training loss for scheduler)")
+    parser.add_argument("--scheduler_factor", type=float, default=0.1,
+                        help="Factor for ReduceLROnPlateau scheduler (default: 0.1)")
+    parser.add_argument("--scheduler_patience", type=int, default=5,
+                        help="Patience for ReduceLROnPlateau scheduler (default: 5)")
+    parser.add_argument("--early_stop_patience", type=int, default=10,
+                        help="Patience for EarlyStopping (default: 10, should be > scheduler_patience)")
     return parser.parse_args()
 
 
@@ -130,10 +138,16 @@ def run_qat_for_user(args, user):
         "--qat_epochs", str(args.qat_epochs),
         "--lr", str(args.lr),
         "--seed", str(args.seed),
+        "--scheduler_factor", str(args.scheduler_factor),
+        "--scheduler_patience", str(args.scheduler_patience),
+        "--early_stop_patience", str(args.early_stop_patience),
     ]
     
     if args.quantize_dense_names:
         cmd.extend(["--quantize_dense_names"] + args.quantize_dense_names)
+    
+    if args.no_validation:
+        cmd.append("--no_validation")
     
     print(f"[RUN] Executing QAT for {user}...")
     print(f"Command: {' '.join(cmd)}")
@@ -196,6 +210,9 @@ def main():
     print(f"Learning rate: {args.lr}")
     print(f"Seed: {args.seed}")
     print(f"Output base dir: {args.output_base_dir}")
+    print(f"Validation: {'DISABLED' if args.no_validation else 'ENABLED'}")
+    print(f"Scheduler: ReduceLROnPlateau (factor={args.scheduler_factor}, patience={args.scheduler_patience})")
+    print(f"  Monitor: {'loss' if args.no_validation else 'val_loss'}")
     print(f"Users to process: {len(users_to_run)} ({', '.join(users_to_run)})")
     print("="*80)
     print()
