@@ -29,26 +29,12 @@ from attention import SelfAttention, CrossAttention, CausalSelfAttention
 
 
 @tf.keras.utils.register_keras_serializable()
-class Top5Accuracy(keras.metrics.Metric):
-    def __init__(self, name="Top5Accuracy", **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.top5_correct = self.add_weight(name="top5_correct", initializer="zeros")
-        self.total = self.add_weight(name="total", initializer="zeros")
+class Top5Accuracy(keras.metrics.SparseTopKCategoricalAccuracy):
+    """Top-5 accuracy metric compatible with saved models (k configurable)."""
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        top5_preds = tf.nn.top_k(y_pred, k=5).indices
-        y_true_expanded = tf.expand_dims(tf.cast(y_true, tf.int32), axis=1)
-        top5_preds = tf.cast(top5_preds, tf.int32)
-        correct = tf.reduce_any(tf.equal(top5_preds, y_true_expanded), axis=1)
-        self.top5_correct.assign_add(tf.reduce_sum(tf.cast(correct, tf.float32)))
-        self.total.assign_add(tf.cast(tf.shape(y_true)[0], tf.float32))
-
-    def result(self):
-        return self.top5_correct / self.total
-
-    def reset_state(self):
-        self.top5_correct.assign(0.0)
-        self.total.assign(0.0)
+    def __init__(self, k=5, name="top5_accuracy", **kwargs):
+        # Accept k from config during deserialization; default to 5
+        super().__init__(k=k, name=name, **kwargs)
 
 
 MAX_SEQ_LEN = 64
