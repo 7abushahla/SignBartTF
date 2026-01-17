@@ -179,8 +179,14 @@ class SignDataset:
         """
         assert keypoint.shape[-1] == 2, "Keypoints must have x, y"
         
-        x_coords = keypoint[:, 0]
-        y_coords = keypoint[:, 1]
+        # Ignore missing keypoints (0, 0) to match on-device preprocessing
+        valid_mask = (keypoint[:, 0] != 0.0) | (keypoint[:, 1] != 0.0)
+        valid_kpts = keypoint[valid_mask]
+        if valid_kpts.size == 0:
+            return keypoint
+        
+        x_coords = valid_kpts[:, 0]
+        y_coords = valid_kpts[:, 1]
         
         min_x, min_y = np.min(x_coords), np.min(y_coords)
         max_x, max_y = np.max(x_coords), np.max(y_coords)
@@ -199,12 +205,12 @@ class SignDataset:
         s_point = [max(0, min(min_x - delta_x, 1)), max(0, min(min_y - delta_y, 1))]
         e_point = [max(0, min(max_x + delta_x, 1)), max(0, min(max_y + delta_y, 1))]
         
-        # Normalize keypoints
+        # Normalize keypoints (only for valid points)
         result = keypoint.copy()
         if (e_point[0] - s_point[0]) != 0.0:
-            result[:, 0] = (keypoint[:, 0] - s_point[0]) / (e_point[0] - s_point[0])
+            result[valid_mask, 0] = (keypoint[valid_mask, 0] - s_point[0]) / (e_point[0] - s_point[0])
         if (e_point[1] - s_point[1]) != 0.0:
-            result[:, 1] = (keypoint[:, 1] - s_point[1]) / (e_point[1] - s_point[1])
+            result[valid_mask, 1] = (keypoint[valid_mask, 1] - s_point[1]) / (e_point[1] - s_point[1])
         
         return result
     

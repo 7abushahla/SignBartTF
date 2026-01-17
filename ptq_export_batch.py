@@ -19,6 +19,8 @@ Example:
 import argparse
 import os
 import sys
+import glob
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -33,33 +35,19 @@ from encoder import Encoder, EncoderLayer
 from decoder import Decoder, DecoderLayer
 from attention import SelfAttention, CrossAttention, CausalSelfAttention
 
-# LOSO test users - matches train_loso.py configuration
-LOSO_USERS = ["user01", "user08", "user11"]
+# Default LOSO users - can be overridden via --holdouts or auto-discovery
+DEFAULT_HOLDOUTS = "user01,user08,user11"
 EXPERIMENT_PREFIX = "arabic_asl_LOSO_"
 MAX_SEQ_LEN = 64
 
 
 @tf.keras.utils.register_keras_serializable()
-class Top5Accuracy(keras.metrics.Metric):
-    def __init__(self, name="Top5Accuracy", **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.top5_correct = self.add_weight(name="top5_correct", initializer="zeros")
-        self.total = self.add_weight(name="total", initializer="zeros")
+class Top5Accuracy(keras.metrics.SparseTopKCategoricalAccuracy):
+    """Top-5 accuracy metric compatible with saved models (k configurable)."""
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        top5_preds = tf.nn.top_k(y_pred, k=5).indices
-        y_true_expanded = tf.expand_dims(tf.cast(y_true, tf.int32), axis=1)
-        top5_preds = tf.cast(top5_preds, tf.int32)
-        correct = tf.reduce_any(tf.equal(top5_preds, y_true_expanded), axis=1)
-        self.top5_correct.assign_add(tf.reduce_sum(tf.cast(correct, tf.float32)))
-        self.total.assign_add(tf.cast(tf.shape(y_true)[0], tf.float32))
-
-    def result(self):
-        return self.top5_correct / self.total
-
-    def reset_state(self):
-        self.top5_correct.assign(0.0)
-        self.total.assign(0.0)
+    def __init__(self, name="top5_accuracy", **kwargs):
+        k = kwargs.pop("k", 5)
+        super().__init__(k=k, name=name, **kwargs)
 
 
 def parse_args():
@@ -86,8 +74,12 @@ Example usage:
                         help="Base path to processed data (without _LOSO suffix)")
     parser.add_argument("--holdout_only", type=str, default="",
                         help="Export PTQ only for specific user (e.g., 'user01') - USE THIS TO TEST FIRST!")
+    parser.add_argument("--holdouts", type=str, default=DEFAULT_HOLDOUTS,
+                        help="Comma-separated holdout users or 'all' to use all users")
     parser.add_argument("--output_base_dir", type=str, default="exports/ptq_loso",
                         help="Base directory for PTQ outputs (will create subdirs per user)")
+    parser.add_argument("--exp_prefix", type=str, default="",
+                        help="Experiment prefix used during training (optional)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
     return parser.parse_args()
@@ -102,6 +94,27 @@ def set_seed(seed: int):
 def load_config(config_path: str):
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+
+def discover_users(base_data_path):
+    """Discover user IDs from filenames in base_data_path/all/G??/*.pkl."""
+    all_glob = os.path.join(base_data_path, "all", "G??", "*.pkl")
+    users = set()
+    for p in glob.glob(all_glob):
+        bn = os.path.basename(p)
+        m = re.match(r"(user\d{2})_G\d{2}_R\d{2}\.pkl$", bn)
+        if m:
+            users.add(m.group(1))
+    return sorted(users)
+
+
+def build_experiment_prefix(config, exp_prefix=""):
+    if exp_prefix:
+        return f"{exp_prefix}_arabic_asl_LOSO_"
+    joint_idx = config.get("joint_idx") if isinstance(config, dict) else None
+    if isinstance(joint_idx, list) and len(joint_idx) > 0:
+        return f"arabic_asl_{len(joint_idx)}kpts_LOSO_"
+    return "arabic_asl_LOSO_"
 
 
 def get_custom_objects():
@@ -218,13 +231,20 @@ def main():
     
     # Load config
     config = load_config(args.config_path)
+    global EXPERIMENT_PREFIX
+    EXPERIMENT_PREFIX = build_experiment_prefix(config, exp_prefix=args.exp_prefix)
     
+    # Resolve users to process
+    if args.holdouts.strip().lower() == "all":
+        users_to_run = discover_users(args.base_data_path)
+    else:
+        users_to_run = [u.strip() for u in args.holdouts.split(",") if u.strip()]
+
     # Filter users if holdout_only specified
-    users_to_run = LOSO_USERS
     if args.holdout_only:
-        if args.holdout_only not in LOSO_USERS:
+        if args.holdout_only not in users_to_run:
             print(f"ERROR: Invalid user '{args.holdout_only}'")
-            print(f"Valid options: {', '.join(LOSO_USERS)}")
+            print(f"Valid options: {', '.join(users_to_run)}")
             sys.exit(1)
         users_to_run = [args.holdout_only]
         print(f"[INFO] TESTING MODE: Exporting PTQ only for {args.holdout_only}")

@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
+import gc
 from tensorflow import keras
 import tensorflow_model_optimization as tfmot
 import yaml
@@ -110,22 +111,37 @@ def determine_keypoint_groups(config_joint_idx):
     sorted_idx = sorted(config_joint_idx)
     total = len(sorted_idx)
     groups = []
-    if total >= 67:
+
+    # With face (90 or 100 total): Pose + Left Hand + Right Hand + Face
+    if total in (90, 100):
+        body_count = total - 67  # 21 + 21 + 25 = 67
+        body = sorted_idx[:body_count]
+        left_hand = sorted_idx[body_count:body_count + 21]
+        right_hand = sorted_idx[body_count + 21:body_count + 42]
         face = sorted_idx[-25:]
-        right_hand = sorted_idx[-46:-25]
-        left_hand = sorted_idx[-67:-46]
-        body = sorted_idx[:-67]
+
         if body:
             groups.append(body)
-        if left_hand:
-            groups.append(left_hand)
-        if right_hand:
-            groups.append(right_hand)
-        if face:
-            groups.append(face)
-    else:
-        groups.append(sorted_idx)
-    return groups
+        groups.append(left_hand)
+        groups.append(right_hand)
+        groups.append(face)
+        return groups
+
+    # No face (>= 42 total): Pose/Body + Left Hand + Right Hand
+    if total >= 42:
+        body_count = total - 42
+        body = sorted_idx[:body_count] if body_count > 0 else []
+        left_hand = sorted_idx[body_count:body_count + 21]
+        right_hand = sorted_idx[body_count + 21:body_count + 42]
+
+        if body:
+            groups.append(body)
+        groups.append(left_hand)
+        groups.append(right_hand)
+        return groups
+
+    # Fallback: single group
+    return [sorted_idx]
 
 
 def create_dataset(root, joint_groups, batch_size, split, augment):
@@ -168,6 +184,7 @@ def get_custom_objects():
     }
 
 
+@tf.keras.utils.register_keras_serializable()
 class NoOpQuantizeConfig(tfmot.quantization.keras.QuantizeConfig):
     def get_weights_and_quantizers(self, layer):
         return []
@@ -183,6 +200,13 @@ class NoOpQuantizeConfig(tfmot.quantization.keras.QuantizeConfig):
 
     def get_output_quantizers(self, layer):
         return []
+
+    def get_config(self):
+        return {}
+
+    @classmethod
+    def from_config(cls, config):
+        return cls()
 
     def get_config(self):
         return {}
@@ -611,6 +635,10 @@ def main():
     print(f"  QAT epochs      : {args.qat_epochs}")
     print(f"  QAT model       : {qat_path}")
     print(f"  Dynamic TFLite  : {tflite_path}")
+
+    # Clear GPU/TF resources
+    keras.backend.clear_session()
+    gc.collect()
 
 
 if __name__ == "__main__":

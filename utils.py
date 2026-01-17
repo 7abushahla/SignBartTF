@@ -290,3 +290,27 @@ if __name__ == "__main__":
     
     print("\n✓ All utility tests passed!")
 
+
+
+# =============================================================================
+# 65 Keypoint Configuration (NO FACE) - Added for MLR511_Project compatibility
+# =============================================================================
+
+# Upper body pose (23) + Left hand (21) + Right hand (21) = 65 keypoints
+# This matches on-device preprocessing in:
+#   - MLR511_Project/lib/preprocessing/keypoint_preprocessing.dart
+upper_body_65_idx = list(range(0, 65))
+upper_body_65_groups = [list(range(0, 23)), list(range(23, 44)), list(range(44, 65))]
+
+# Add to the get_keypoint_config function by monkey-patching
+_original_get_keypoint_config = get_keypoint_config
+
+def get_keypoint_config(config_name):
+    """
+    Get keypoint indices and groups by configuration name.
+    
+    Extended to support 'upper_body_65' for 65-keypoint no-face configuration.
+    """
+    if config_name == 'upper_body_65':
+        return (upper_body_65_idx, upper_body_65_groups)
+    return _original_get_keypoint_config(config_name)

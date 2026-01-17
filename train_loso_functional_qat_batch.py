@@ -25,11 +25,14 @@ import argparse
 import os
 import sys
 import subprocess
+import glob
+import re
+import yaml
 from pathlib import Path
 from datetime import datetime
 
-# LOSO test users - matches train_loso.py configuration
-LOSO_USERS = ["user01", "user08", "user11"]
+# Default LOSO users - can be overridden via --holdouts or auto-discovery
+DEFAULT_HOLDOUTS = "user01,user08,user11"
 EXPERIMENT_PREFIX = "arabic_asl_LOSO_"
 
 
@@ -69,8 +72,12 @@ Example usage:
                         help="Random seed")
     parser.add_argument("--holdout_only", type=str, default="",
                         help="Run QAT only for specific user (e.g., 'user01') - USE THIS TO TEST FIRST!")
+    parser.add_argument("--holdouts", type=str, default=DEFAULT_HOLDOUTS,
+                        help="Comma-separated holdout users or 'all' to use all users")
     parser.add_argument("--output_base_dir", type=str, default="exports/qat_loso",
                         help="Base directory for QAT outputs (will create subdirs per user)")
+    parser.add_argument("--exp_prefix", type=str, default="",
+                        help="Experiment prefix used during training (optional)")
     parser.add_argument("--quantize_dense_names", nargs="*", default=None,
                         help="Dense layer name substrings to quantize (default: fc1,fc2,proj,q_proj,k_proj,v_proj,out_proj)")
     parser.add_argument("--skip_tflite_eval", action="store_true",
@@ -84,6 +91,27 @@ Example usage:
     parser.add_argument("--early_stop_patience", type=int, default=10,
                         help="Patience for EarlyStopping (default: 10, should be > scheduler_patience)")
     return parser.parse_args()
+
+
+def build_experiment_prefix(config, exp_prefix=""):
+    if exp_prefix:
+        return f"{exp_prefix}_arabic_asl_LOSO_"
+    joint_idx = config.get("joint_idx") if isinstance(config, dict) else None
+    if isinstance(joint_idx, list) and len(joint_idx) > 0:
+        return f"arabic_asl_{len(joint_idx)}kpts_LOSO_"
+    return "arabic_asl_LOSO_"
+
+
+def discover_users(base_data_path):
+    """Discover user IDs from filenames in base_data_path/all/G??/*.pkl."""
+    all_glob = os.path.join(base_data_path, "all", "G??", "*.pkl")
+    users = set()
+    for p in glob.glob(all_glob):
+        bn = os.path.basename(p)
+        m = re.match(r"(user\d{2})_G\d{2}_R\d{2}\.pkl$", bn)
+        if m:
+            users.add(m.group(1))
+    return sorted(users)
 
 
 def check_prerequisites(base_data_path, user):
@@ -188,13 +216,27 @@ def run_qat_for_user(args, user):
 
 def main():
     args = parse_args()
+
+    try:
+        with open(args.config_path, "r") as f:
+            config = yaml.safe_load(f)
+    except Exception:
+        config = {}
+
+    global EXPERIMENT_PREFIX
+    EXPERIMENT_PREFIX = build_experiment_prefix(config, exp_prefix=args.exp_prefix)
     
+    # Resolve users to process
+    if args.holdouts.strip().lower() == "all":
+        users_to_run = discover_users(args.base_data_path)
+    else:
+        users_to_run = [u.strip() for u in args.holdouts.split(",") if u.strip()]
+
     # Filter users if holdout_only specified
-    users_to_run = LOSO_USERS
     if args.holdout_only:
-        if args.holdout_only not in LOSO_USERS:
+        if args.holdout_only not in users_to_run:
             print(f"ERROR: Invalid user '{args.holdout_only}'")
-            print(f"Valid options: {', '.join(LOSO_USERS)}")
+            print(f"Valid options: {', '.join(users_to_run)}")
             sys.exit(1)
         users_to_run = [args.holdout_only]
         print(f"[INFO] TESTING MODE: Running QAT only for {args.holdout_only}")

@@ -21,6 +21,7 @@ compatible with Quantization-Aware Training (QAT).
 
 import sys
 import argparse
+import os
 
 def main():
     # Parse arguments
@@ -54,7 +55,7 @@ Example usage:
                         help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=2e-4,
                         help="Learning rate")
-    parser.add_argument("--seed", type=int, default=379,
+    parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
     parser.add_argument("--pretrained_path", type=str, default="",
                         help="Path to pretrained model (.h5 file, optional)")
@@ -62,6 +63,8 @@ Example usage:
                         help="Skip training and only run evaluation")
     parser.add_argument("--holdout_only", type=str, default="",
                         help="Train only specific holdout user (e.g., 'user01', 'user02') - USE THIS TO TEST FIRST!")
+    parser.add_argument("--holdouts", type=str, default="",
+                        help="Comma-separated holdout users or 'all' to use all users")
     parser.add_argument("--no_validation", action="store_true",
                         help="Disable validation during training (test evaluation will run after)")
     parser.add_argument("--skip_final_eval", action="store_true",
@@ -76,9 +79,12 @@ Example usage:
     import subprocess
     
     # Build command to call train_loso.py with --use_functional flag
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    train_loso_path = os.path.join(script_dir, "train_loso.py")
+
     cmd = [
         sys.executable,
-        "train_loso.py",
+        train_loso_path,
         "--config_path", args.config_path,
         "--base_data_path", args.base_data_path,
         "--epochs", str(args.epochs),
@@ -95,6 +101,9 @@ Example usage:
     
     if args.holdout_only:
         cmd.extend(["--holdout_only", args.holdout_only])
+
+    if args.holdouts:
+        cmd.extend(["--holdouts", args.holdouts])
     
     if args.no_validation:
         cmd.append("--no_validation")

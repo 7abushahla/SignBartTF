@@ -42,34 +42,19 @@ from decoder import Decoder, DecoderLayer
 from attention import SelfAttention, CrossAttention, CausalSelfAttention
 from model_functional import ExtractLastValidToken
 
-# LOSO test users - matches train_loso.py configuration
-TEST_USERS = ["user01", "user08", "user11"]  # 3 users (user02 removed)
+# LOSO test users (fallback)
+TEST_USERS = ["user01", "user08", "user11"]
 EXPERIMENT_PREFIX = "arabic_asl_LOSO_"
 GESTURE_CLASSES = [f"G{i:02d}" for i in range(1, 11)]  # G01-G10
 
 
 @tf.keras.utils.register_keras_serializable()
-class Top5Accuracy(keras.metrics.Metric):
-    """Custom Top-5 accuracy metric for loading models."""
-    def __init__(self, name="Top5Accuracy", **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.top5_correct = self.add_weight(name="top5_correct", initializer="zeros")
-        self.total = self.add_weight(name="total", initializer="zeros")
+class Top5Accuracy(keras.metrics.SparseTopKCategoricalAccuracy):
+    """Top-5 accuracy metric compatible with saved models (k configurable)."""
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        top5_preds = tf.nn.top_k(y_pred, k=5).indices
-        y_true_expanded = tf.expand_dims(tf.cast(y_true, tf.int32), axis=1)
-        top5_preds = tf.cast(top5_preds, tf.int32)
-        correct = tf.reduce_any(tf.equal(top5_preds, y_true_expanded), axis=1)
-        self.top5_correct.assign_add(tf.reduce_sum(tf.cast(correct, tf.float32)))
-        self.total.assign_add(tf.cast(tf.shape(y_true)[0], tf.float32))
-
-    def result(self):
-        return self.top5_correct / self.total
-
-    def reset_state(self):
-        self.top5_correct.assign(0.0)
-        self.total.assign(0.0)
+    def __init__(self, name="top5_accuracy", **kwargs):
+        k = kwargs.pop("k", 5)
+        super().__init__(k=k, name=name, **kwargs)
 
 
 class DualWriter:
@@ -216,6 +201,61 @@ def load_config(config_path="configs/arabic-asl.yaml"):
         return yaml.safe_load(f)
 
 
+def discover_users(base_data_path):
+    """Discover user IDs from filenames in base_data_path/all/G??/*.pkl."""
+    all_glob = os.path.join(base_data_path, "all", "G??", "*.pkl")
+    users = set()
+    for p in Path(base_data_path).glob("all/G??/*.pkl"):
+        bn = p.name
+        m = re.match(r"(user\d{2})_G\d{2}_R\d{2}\.pkl$", bn)
+        if m:
+            users.add(m.group(1))
+    return sorted(users) if users else TEST_USERS
+
+
+def compute_mean_std(values):
+    if not values:
+        return None, None
+    arr = np.array(values, dtype=float)
+    return float(np.mean(arr)), float(np.std(arr, ddof=0))
+
+
+def aggregate_seed_metrics(seed_results, test_users, model_key, metric):
+    """Aggregate metric across seeds. Returns per-user and overall mean/std."""
+    per_user_values = {user: [] for user in test_users}
+    per_seed_avg = []
+
+    for seed_res in seed_results:
+        model_results = seed_res.get(model_key, {})
+        seed_vals = []
+        for user in test_users:
+            val = model_results.get(user, {}).get(metric)
+            if val is not None:
+                per_user_values[user].append(val)
+                seed_vals.append(val)
+        if seed_vals:
+            per_seed_avg.append(sum(seed_vals) / len(seed_vals))
+
+    per_user_stats = {user: compute_mean_std(vals) for user, vals in per_user_values.items()}
+    overall_stats = compute_mean_std(per_seed_avg)
+    return per_user_stats, overall_stats
+
+
+def build_experiment_prefix(config_path, exp_prefix=""):
+    """Build experiment prefix with keypoint count or explicit prefix."""
+    default_prefix = "arabic_asl_LOSO_"
+    if exp_prefix:
+        return f"{exp_prefix}_arabic_asl_LOSO_"
+    try:
+        config = load_config(config_path)
+        joint_idx = config.get("joint_idx") if isinstance(config, dict) else None
+        if isinstance(joint_idx, list) and len(joint_idx) > 0:
+            return f"arabic_asl_{len(joint_idx)}kpts_LOSO_"
+    except Exception:
+        return default_prefix
+    return default_prefix
+
+
 def count_model_parameters(config):
     """Count model parameters by building the model."""
     model = build_signbart_functional_with_dict_inputs(config)
@@ -288,6 +328,50 @@ def get_custom_objects():
         "ExtractLastValidToken": ExtractLastValidToken,
         "Top5Accuracy": Top5Accuracy,
     }
+
+
+def evaluate_seed_results(config_path, base_data_path, exp_prefix, test_users, ptq_base_dir, qat_base_dir):
+    """Evaluate checkpoints and TFLite models for a single experiment prefix."""
+    all_results = {}
+    fp32_tflite_results = {}
+    ptq_results = {}
+    qat_results = {}
+
+    config = load_config(config_path)
+
+    for user in test_users:
+        exp_name = f"{exp_prefix}{user}"
+        loso_data_path = f"{base_data_path}_LOSO_{user}"
+        checkpoint_dir = f"checkpoints_{exp_name}"
+
+        results = evaluate_model_from_checkpoint(
+            config_path,
+            loso_data_path,
+            checkpoint_dir,
+            user
+        )
+        if results:
+            all_results[user] = results
+
+        fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+        if os.path.exists(fp32_tflite_path):
+            fp32_res = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32")
+            if fp32_res:
+                fp32_tflite_results[user] = fp32_res
+
+        ptq_path = f"{ptq_base_dir}/{user}/model_dynamic_int8.tflite"
+        if os.path.exists(ptq_path):
+            ptq_res = evaluate_tflite_model(ptq_path, loso_data_path, config, user, "INT8-PTQ")
+            if ptq_res:
+                ptq_results[user] = ptq_res
+
+        qat_path = f"{qat_base_dir}/{user}/qat_dynamic_int8.tflite"
+        if os.path.exists(qat_path):
+            qat_res = evaluate_tflite_model(qat_path, loso_data_path, config, user, "INT8-QAT")
+            if qat_res:
+                qat_results[user] = qat_res
+
+    return all_results, fp32_tflite_results, ptq_results, qat_results
 
 
 def evaluate_tflite_model(tflite_path, data_path, config, user, model_type="TFLite"):
@@ -735,6 +819,12 @@ def parse_log_file(log_path):
     return results
 
 
+def resolve_log_path(exp_name):
+    preferred = os.path.join("logs", "run_logs", f"{exp_name}.log")
+    legacy = f"{exp_name}.log"
+    return preferred if os.path.exists(preferred) else legacy
+
+
 def calculate_per_class_statistics(all_results):
     """Calculate detailed statistics for each gesture class across all users."""
     class_stats = {}
@@ -742,7 +832,7 @@ def calculate_per_class_statistics(all_results):
     for gesture in GESTURE_CLASSES:
         accuracies = []
         
-        for user in TEST_USERS:
+        for user in test_users:
             results = all_results.get(user)
             if results and gesture in results.get('per_class_acc', {}):
                 acc = results['per_class_acc'][gesture] * 100
@@ -761,7 +851,7 @@ def calculate_per_class_statistics(all_results):
     return class_stats
 
 
-def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflite_results=None, flops_value=None, output_dir="results"):
+def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflite_results=None, flops_value=None, output_dir="results", test_users=None, ptq_base_dir="exports/ptq_loso", qat_base_dir="exports/qat_loso"):
     """Save summary tables as CSV files."""
     os.makedirs(output_dir, exist_ok=True)
     
@@ -772,13 +862,16 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
     if fp32_tflite_results is None:
         fp32_tflite_results = {}
     
+    if test_users is None:
+        test_users = TEST_USERS
+
     # Summary table
     summary_file = os.path.join(output_dir, "summary_table.csv")
     with open(summary_file, 'w') as f:
         has_validation = any(r.get('has_validation', True) for r in all_results.values())
         show_test = any(r.get('test_acc') is not None for r in all_results.values())
-        has_ptq = any(os.path.exists(f"exports/ptq_loso/{user}/model_dynamic_int8.tflite") for user in TEST_USERS)
-        has_qat = any(os.path.exists(f"exports/qat_loso/{user}/qat_dynamic_int8.tflite") for user in TEST_USERS)
+        has_ptq = any(os.path.exists(f"{ptq_base_dir}/{user}/model_dynamic_int8.tflite") for user in test_users)
+        has_qat = any(os.path.exists(f"{qat_base_dir}/{user}/qat_dynamic_int8.tflite") for user in test_users)
         
         header = "Test Signer,FP32 Acc (%),FP32 Size (MB),FP32 Time (ms)"
         if has_ptq:
@@ -788,7 +881,7 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
         header += "\n"
         f.write(header)
         
-        for user in TEST_USERS:
+        for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
             
             # FP32 TFLite results (use TFLite for consistency)
@@ -815,7 +908,7 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
             ptq_size = ptq_results.get(user, {}).get('file_size_mb', 0) if ptq_results.get(user) else 0
             ptq_time_ms = ptq_results.get(user, {}).get('time_per_sample', 0) * 1000 if ptq_results.get(user) else 0
             if not ptq_results.get(user):
-                ptq_path = f"exports/ptq_loso/{user}/model_dynamic_int8.tflite"
+                ptq_path = f"{ptq_base_dir}/{user}/model_dynamic_int8.tflite"
                 if os.path.exists(ptq_path):
                     ptq_size = os.path.getsize(ptq_path) / (1024**2)
             
@@ -824,7 +917,7 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
             qat_size = qat_results.get(user, {}).get('file_size_mb', 0) if qat_results.get(user) else 0
             qat_time_ms = qat_results.get(user, {}).get('time_per_sample', 0) * 1000 if qat_results.get(user) else 0
             if not qat_results.get(user):
-                qat_path = f"exports/qat_loso/{user}/qat_dynamic_int8.tflite"
+                qat_path = f"{qat_base_dir}/{user}/qat_dynamic_int8.tflite"
                 if os.path.exists(qat_path):
                     qat_size = os.path.getsize(qat_path) / (1024**2)
             
@@ -851,7 +944,6 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
         try:
             from model_functional import build_signbart_functional_with_dict_inputs
             import yaml
-            config_path = "configs/arabic-asl.yaml"
             with open(config_path, 'r') as cfg_f:
                 config = yaml.safe_load(cfg_f)
             
@@ -881,14 +973,14 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
     if has_per_class:
         perclass_file = os.path.join(output_dir, "per_class_accuracy.csv")
         with open(perclass_file, 'w') as f:
-            header = "Class," + ",".join(TEST_USERS) + ",Average\n"
+            header = "Class," + ",".join(test_users) + ",Average\n"
             f.write(header)
             
             for gesture in GESTURE_CLASSES:
                 row = f"{gesture}"
                 class_accs = []
                 
-                for user in TEST_USERS:
+                for user in test_users:
                     results = all_results.get(user)
                     if results and gesture in results.get('per_class_acc', {}):
                         acc = results['per_class_acc'][gesture] * 100
@@ -909,7 +1001,7 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
 
 def merge_training_metrics_from_logs(exp_name, results):
     """Merge training metrics parsed from <exp_name>.log into 'results'."""
-    log_path = f"{exp_name}.log"
+    log_path = resolve_log_path(exp_name)
     parsed = parse_log_file(log_path)
     if not parsed:
         return results
@@ -963,7 +1055,9 @@ def save_training_curves(all_results, output_dir="results"):
 
 
 def generate_report(output_file=None, console=True, save_csv=True, run_evaluation=False,
-                   config_path="configs/arabic-asl.yaml", base_data_path="data/arabic-asl"):
+                   config_path="configs/arabic-asl.yaml", base_data_path="data/arabic-asl", exp_prefix="",
+                   ptq_base_dir="exports/ptq_loso", qat_base_dir="exports/qat_loso",
+                   seed_list=None, exp_prefix_base=""):
     """
     Generate comprehensive report.
     
@@ -986,6 +1080,52 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
     print(f"\n{'='*80}")
     print(f"REPORT GENERATION MODE: {'MODEL EVALUATION' if run_evaluation else 'LOG PARSING'}")
     print(f"{'='*80}\n")
+
+    global EXPERIMENT_PREFIX
+    EXPERIMENT_PREFIX = build_experiment_prefix(config_path, exp_prefix=exp_prefix)
+    test_users = discover_users(base_data_path)
+
+    seed_list = seed_list or []
+    seed_multi = run_evaluation and len(seed_list) > 1
+    seed_single = run_evaluation and len(seed_list) == 1
+    seed_any = seed_multi or seed_single
+    seed_results = []
+
+    if seed_any:
+        config = load_config(config_path)
+        base_prefix = exp_prefix_base or exp_prefix or f"arabic_asl_{len(config.get('joint_idx', []))}kpts"
+        for seed in seed_list:
+            seed_prefix = f"{base_prefix}_seed{seed}"
+            seed_exp_prefix = build_experiment_prefix(config_path, exp_prefix=seed_prefix)
+            seed_ptq_dir = ptq_base_dir.format(seed=seed) if "{seed}" in ptq_base_dir else ptq_base_dir
+            seed_qat_dir = qat_base_dir.format(seed=seed) if "{seed}" in qat_base_dir else qat_base_dir
+            seed_all, seed_fp32, seed_ptq, seed_qat = evaluate_seed_results(
+                config_path=config_path,
+                base_data_path=base_data_path,
+                exp_prefix=seed_exp_prefix,
+                test_users=test_users,
+                ptq_base_dir=seed_ptq_dir,
+                qat_base_dir=seed_qat_dir,
+            )
+            seed_results.append({
+                "seed": seed,
+                "exp_prefix": seed_exp_prefix,
+                "all_results": seed_all,
+                "fp32_tflite_results": seed_fp32,
+                "ptq_results": seed_ptq,
+                "qat_results": seed_qat,
+            })
+
+        if seed_results:
+            first_seed_prefix = f"{base_prefix}_seed{seed_results[0]['seed']}"
+            EXPERIMENT_PREFIX = build_experiment_prefix(config_path, exp_prefix=first_seed_prefix)
+
+    if seed_any and seed_results:
+        ptq_base_dir_run = ptq_base_dir.format(seed=seed_results[0]["seed"]) if "{seed}" in ptq_base_dir else ptq_base_dir
+        qat_base_dir_run = qat_base_dir.format(seed=seed_results[0]["seed"]) if "{seed}" in qat_base_dir else qat_base_dir
+    else:
+        ptq_base_dir_run = ptq_base_dir
+        qat_base_dir_run = qat_base_dir
     
     # Store PTQ, QAT, and FP32 TFLite results for CSV export
     ptq_results_global = {}
@@ -995,7 +1135,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
     with DualWriter(output_file, console=console) as writer:
         writer.writeln("="*80)
         writer.writeln("ARABIC SIGN LANGUAGE RECOGNITION - EXPERIMENTAL RESULTS")
-        writer.writeln(f"LOSO Cross-Validation with {len(TEST_USERS)} Test Signers (TensorFlow)")
+        writer.writeln(f"LOSO Cross-Validation with {len(test_users)} Test Signers (TensorFlow)")
         writer.writeln(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         if run_evaluation:
             writer.writeln(f"Mode: DIRECT MODEL EVALUATION (from checkpoints)")
@@ -1066,7 +1206,12 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         writer.writeln("  Batch size: 1")
         writer.writeln("  Number of epochs: 80")
         writer.writeln("  LR Scheduler: ReduceLROnPlateau")
-        writer.writeln("  Random seed: 379")
+        if seed_multi:
+            writer.writeln(f"  Random seeds: {', '.join(str(s) for s in seed_list)}")
+        elif seed_single:
+            writer.writeln(f"  Random seed: {seed_list[0]}")
+        else:
+            writer.writeln("  Random seed: 42")
         writer.writeln()
         
         # 3. Model Size and Parameters
@@ -1112,16 +1257,20 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         writer.writeln("-" * 80)
         writer.writeln()
         
-        all_results = {}
+        all_results = seed_results[0]["all_results"].copy() if (seed_any and seed_results) else {}
         has_validation = True
         
-        for user in TEST_USERS:
+        for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
             
             writer.writeln(f"Test Signer: {user.upper()}")
             writer.writeln(f"  Training set: All users except {user}")
             
-            if run_evaluation:
+            if run_evaluation and seed_any:
+                results = seed_results[0]["all_results"].get(user) if seed_results else None
+                if results:
+                    writer.writeln("  ✓ Evaluated from checkpoint (seed sweep)")
+            elif run_evaluation:
                 # NEW: Load model and evaluate
                 loso_data_path = f"{base_data_path}_LOSO_{user}"
                 checkpoint_dir = f"checkpoints_{exp_name}"
@@ -1137,7 +1286,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                     writer.writeln(f"  ✓ Evaluated from checkpoint: {results.get('checkpoint_used', 'N/A')}")
             else:
                 # ORIGINAL: Parse log files
-                log_path = f"{exp_name}.log"
+                log_path = resolve_log_path(exp_name)
                 results = parse_log_file(log_path)
                 
                 if results:
@@ -1196,7 +1345,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         writer.writeln()
         
         fp32_tflite_results = {}  # Store for CSV export
-        for user in TEST_USERS:
+        for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
             loso_data_path = f"{base_data_path}_LOSO_{user}"
             fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
@@ -1204,7 +1353,13 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             writer.writeln(f"Test Signer: {user.upper()}")
             
             if os.path.exists(fp32_tflite_path):
-                if run_evaluation:
+                if run_evaluation and seed_any:
+                    fp32_tflite_result = seed_results[0]["fp32_tflite_results"].get(user) if seed_results else None
+                    if fp32_tflite_result:
+                        fp32_tflite_results[user] = fp32_tflite_result
+                        fp32_tflite_results_global[user] = fp32_tflite_result
+                        writer.writeln(f"  ✓ FP32 TFLite model evaluated")
+                elif run_evaluation:
                     fp32_tflite_result = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32")
                     if fp32_tflite_result:
                         fp32_tflite_results[user] = fp32_tflite_result
@@ -1234,15 +1389,21 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         writer.writeln()
         
         ptq_results = {}  # Store for CSV export
-        for user in TEST_USERS:
+        for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
             loso_data_path = f"{base_data_path}_LOSO_{user}"
-            ptq_path = f"exports/ptq_loso/{user}/model_dynamic_int8.tflite"
+            ptq_path = f"{ptq_base_dir_run}/{user}/model_dynamic_int8.tflite"
             
             writer.writeln(f"Test Signer: {user.upper()}")
             
             if os.path.exists(ptq_path):
-                if run_evaluation:
+                if run_evaluation and seed_any:
+                    ptq_result = seed_results[0]["ptq_results"].get(user) if seed_results else None
+                    if ptq_result:
+                        ptq_results[user] = ptq_result
+                        ptq_results_global[user] = ptq_result
+                        writer.writeln(f"  ✓ PTQ model evaluated")
+                elif run_evaluation:
                     ptq_result = evaluate_tflite_model(ptq_path, loso_data_path, config, user, "INT8-PTQ")
                     if ptq_result:
                         ptq_results[user] = ptq_result
@@ -1270,15 +1431,21 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         writer.writeln()
         
         qat_results = {}
-        for user in TEST_USERS:
+        for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
             loso_data_path = f"{base_data_path}_LOSO_{user}"
-            qat_path = f"exports/qat_loso/{user}/qat_dynamic_int8.tflite"
+            qat_path = f"{qat_base_dir_run}/{user}/qat_dynamic_int8.tflite"
             
             writer.writeln(f"Test Signer: {user.upper()}")
             
             if os.path.exists(qat_path):
-                if run_evaluation:
+                if run_evaluation and seed_any:
+                    qat_result = seed_results[0]["qat_results"].get(user) if seed_results else None
+                    if qat_result:
+                        qat_results[user] = qat_result
+                        qat_results_global[user] = qat_result
+                        writer.writeln(f"  ✓ QAT model evaluated")
+                elif run_evaluation:
                     qat_result = evaluate_tflite_model(qat_path, loso_data_path, config, user, "INT8-QAT")
                     if qat_result:
                         qat_results[user] = qat_result
@@ -1310,7 +1477,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         if has_per_class:
             # Create table header
             header = f"{'Class':<10}"
-            for user in TEST_USERS:
+            for user in test_users:
                 header += f" {user:<12}"
             header += f" {'Average':<12}"
             writer.writeln(header)
@@ -1322,7 +1489,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                 row = f"{gesture:<10}"
                 class_accs = []
                 
-                for user in TEST_USERS:
+                for user in test_users:
                     results = all_results.get(user)
                     if results and gesture in results.get('per_class_acc', {}):
                         acc = results['per_class_acc'][gesture] * 100
@@ -1347,7 +1514,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             if class_averages:
                 overall_avg = sum(class_averages.values()) / len(class_averages)
                 overall_row = f"{'Overall Avg':<10}"
-                overall_row += f" {' ':<{12 * len(TEST_USERS)}}"
+                overall_row += f" {' ':<{12 * len(test_users)}}"
                 overall_row += f" {overall_avg:<12.2f}"
                 writer.writeln(overall_row)
             
@@ -1362,7 +1529,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         writer.writeln("-" * 80)
         writer.writeln()
         
-        for user in TEST_USERS:
+        for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
             
             writer.writeln(f"Test Signer: {user.upper()}")
@@ -1392,8 +1559,8 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         
         show_val = has_validation
         show_test = any(r.get('test_acc') is not None for r in all_results.values())
-        has_ptq = any(os.path.exists(f"exports/ptq_loso/{user}/model_dynamic_int8.tflite") for user in TEST_USERS)
-        has_qat = any(os.path.exists(f"exports/qat_loso/{user}/qat_dynamic_int8.tflite") for user in TEST_USERS)
+        has_ptq = any(os.path.exists(f"{ptq_base_dir_run}/{user}/model_dynamic_int8.tflite") for user in test_users)
+        has_qat = any(os.path.exists(f"{qat_base_dir_run}/{user}/qat_dynamic_int8.tflite") for user in test_users)
         
         header = f"{'Test Signer':<15} {'FP32 Acc (%)':<15} {'FP32 Size (MB)':<18} {'FP32 Time (ms)':<18}"
         if has_ptq:
@@ -1404,7 +1571,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         writer.writeln(header)
         writer.writeln("-" * 80)
         
-        for user in TEST_USERS:
+        for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
             loso_data_path = f"{base_data_path}_LOSO_{user}"
             
@@ -1442,7 +1609,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             ptq_time_ms = ptq_results.get(user, {}).get('time_per_sample', 0) * 1000 if ptq_results.get(user) else 0
             
             if not ptq_results.get(user):
-                ptq_path = f"exports/ptq_loso/{user}/model_dynamic_int8.tflite"
+                ptq_path = f"{ptq_base_dir_run}/{user}/model_dynamic_int8.tflite"
                 if os.path.exists(ptq_path):
                     ptq_size = os.path.getsize(ptq_path) / (1024**2)
                     # If not evaluated, try to evaluate now for inference time
@@ -1460,7 +1627,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             qat_time_ms = qat_results.get(user, {}).get('time_per_sample', 0) * 1000 if qat_results.get(user) else 0
             
             if not qat_results.get(user):
-                qat_path = f"exports/qat_loso/{user}/qat_dynamic_int8.tflite"
+                qat_path = f"{qat_base_dir_run}/{user}/qat_dynamic_int8.tflite"
                 if os.path.exists(qat_path):
                     qat_size = os.path.getsize(qat_path) / (1024**2)
                     # If not evaluated, try to evaluate now for inference time
@@ -1499,7 +1666,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                 avg_fp32_acc = (sum(test_accs) / len(test_accs) * 100) if test_accs else 0
                 
                 fp32_tflite_sizes = []
-                for user in TEST_USERS:
+                for user in test_users:
                     exp_name = f"{EXPERIMENT_PREFIX}{user}"
                     fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
                     if os.path.exists(fp32_tflite_path):
@@ -1533,6 +1700,44 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             writer.writeln(row)
             writer.writeln("=" * 80)
             writer.writeln()
+
+        if seed_multi and seed_results:
+            writer.writeln("8. MULTI-SEED SUMMARY (MEAN ± STD)")
+            writer.writeln("-" * 80)
+            writer.writeln(f"Seeds: {', '.join(str(s['seed']) for s in seed_results)}")
+            writer.writeln()
+
+            model_specs = [
+                ("FP32 (Keras)", "all_results"),
+                ("FP32 TFLite", "fp32_tflite_results"),
+                ("INT8 PTQ", "ptq_results"),
+                ("INT8 QAT", "qat_results"),
+            ]
+            metric_specs = [
+                ("test_acc", "Accuracy (%)", 100.0),
+                ("test_top5", "Top-5 Accuracy (%)", 100.0),
+                ("time_per_sample", "Time per sample (ms)", 1000.0),
+                ("file_size_mb", "Model size (MB)", 1.0),
+            ]
+
+            for model_label, model_key in model_specs:
+                writer.writeln(f"{model_label}:")
+                for metric_key, metric_label, scale in metric_specs:
+                    per_user_stats, overall_stats = aggregate_seed_metrics(
+                        seed_results, test_users, model_key, metric_key
+                    )
+                    if overall_stats[0] is None:
+                        continue
+                    mean_val, std_val = overall_stats
+                    writer.writeln(f"  Overall {metric_label}: {mean_val * scale:.4f} ± {std_val * scale:.4f}")
+                    for user in test_users:
+                        u_mean, u_std = per_user_stats.get(user, (None, None))
+                        if u_mean is None:
+                            continue
+                        writer.writeln(
+                            f"    {user}: {u_mean * scale:.4f} ± {u_std * scale:.4f}"
+                        )
+                writer.writeln()
         
         writer.writeln("="*80)
         writer.writeln("REPORT GENERATION COMPLETE")
@@ -1570,7 +1775,16 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
     
     # Save CSV files
     if save_csv and all_results:
-        save_csv_summary(all_results, ptq_results=ptq_results_global, qat_results=qat_results_global, fp32_tflite_results=fp32_tflite_results_global, flops_value=flops_value)
+        save_csv_summary(
+            all_results,
+            ptq_results=ptq_results_global,
+            qat_results=qat_results_global,
+            fp32_tflite_results=fp32_tflite_results_global,
+            flops_value=flops_value,
+            test_users=test_users,
+            ptq_base_dir=ptq_base_dir_run,
+            qat_base_dir=qat_base_dir_run,
+        )
         save_training_curves(all_results)
     
     return output_file
@@ -1590,16 +1804,35 @@ def main():
                         help="Path to config file (for --run_evaluation mode)")
     parser.add_argument("--base_data_path", type=str, default="data/arabic-asl",
                         help="Base path to data (for --run_evaluation mode)")
+    parser.add_argument("--exp_prefix", type=str, default="",
+                        help="Experiment prefix used during training (optional)")
+    parser.add_argument("--exp_prefix_base", type=str, default="",
+                        help="Base prefix for multi-seed runs (e.g., 'arabic_asl_65kpts_pose_hands')")
+    parser.add_argument("--seed_list", type=str, default="",
+                        help="Comma-separated seeds for multi-seed evaluation (e.g., '42,511,999983')")
+    parser.add_argument("--ptq_base_dir", type=str, default="exports/ptq_loso",
+                        help="Base directory for PTQ TFLite exports")
+    parser.add_argument("--qat_base_dir", type=str, default="exports/qat_loso",
+                        help="Base directory for QAT TFLite exports")
     
     args = parser.parse_args()
     
+    seed_list = []
+    if args.seed_list:
+        seed_list = [int(s.strip()) for s in args.seed_list.split(",") if s.strip()]
+
     output_file = generate_report(
         output_file=args.output,
         console=not args.no_console,
         save_csv=not args.no_csv,
         run_evaluation=args.run_evaluation,
         config_path=args.config_path,
-        base_data_path=args.base_data_path
+        base_data_path=args.base_data_path,
+        exp_prefix=args.exp_prefix,
+        ptq_base_dir=args.ptq_base_dir,
+        qat_base_dir=args.qat_base_dir,
+        seed_list=seed_list,
+        exp_prefix_base=args.exp_prefix_base
     )
     
     if not args.no_console:

@@ -9,6 +9,7 @@ import logging
 import yaml
 import numpy as np
 import tensorflow as tf
+import gc
 from tensorflow import keras
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -39,7 +40,7 @@ def get_default_args():
                         help="Path to the config model to be used")
     parser.add_argument("--pretrained_path", type=str, default="",
                         help="Path to pretrained weights (.h5 file)")
-    parser.add_argument("--seed", type=int, default=379,
+    parser.add_argument("--seed", type=int, default=42,
                         help="Seed with which to initialize all the random components of the training")
     parser.add_argument("--task", type=str, default=False, choices=["train", "eval"],
                         help="Whether to train or evaluate the model")
@@ -74,7 +75,9 @@ def get_default_args():
 
 def setup_logging(experiment_name):
     """Setup logging configuration."""
-    log_file = experiment_name + ".log"
+    log_dir = Path("logs/run_logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = str(log_dir / f"{experiment_name}.log")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -161,53 +164,50 @@ def determine_keypoint_groups(config_joint_idx):
     Determine how to group keypoints for normalization.
     Returns a list of lists, where each inner list is a group to normalize together.
     
-    Automatically detects groups based on sequential keypoint indices.
-    Assumes structure: Pose + Left Hand (21) + Right Hand (21) + Face (remaining)
+    Automatically detects groups based on common MediaPipe layouts:
+      - 65 keypoints: Pose (23) + Left Hand (21) + Right Hand (21)
+      - 75 keypoints: Pose (33) + Left Hand (21) + Right Hand (21)
+      - 90/100 keypoints: Pose (23/33) + Left Hand (21) + Right Hand (21) + Face (25)
     """
     if not config_joint_idx:
         return []
     
     # Sort indices to ensure they're in order
     sorted_idx = sorted(config_joint_idx)
-    
-    # Hand landmarks are always 21 points each (MediaPipe standard)
-    # We'll detect groups by finding where hands start (gaps or pattern)
-    groups = []
-    current_group = []
-    
-    # Strategy: Detect gaps in sequence or use known hand/face sizes
-    # For MediaPipe: Pose (variable) + Hand1 (21) + Hand2 (21) + Face (25)
-    
-    # Find the first hand (21 consecutive points) and second hand (21 consecutive points)
-    # Remaining at end is face (25 points)
-    
     total_kpts = len(sorted_idx)
     
-    # Known structure: last 25 are face, previous 21 are right hand, previous 21 are left hand
-    if total_kpts >= 67:  # At least some pose + 2 hands + face (21+21+25=67)
-        # Last 25: face
+    # With face (90 or 100 total): Pose + Left Hand + Right Hand + Face
+    if total_kpts in (90, 100):
+        body_count = total_kpts - 67  # 21 + 21 + 25 = 67
+        body_kpts = sorted_idx[:body_count]
+        left_hand_kpts = sorted_idx[body_count:body_count + 21]
+        right_hand_kpts = sorted_idx[body_count + 21:body_count + 42]
         face_kpts = sorted_idx[-25:]
-        # Previous 21: right hand  
-        right_hand_kpts = sorted_idx[-46:-25]
-        # Previous 21: left hand
-        left_hand_kpts = sorted_idx[-67:-46]
-        # Everything else: pose/body
-        body_kpts = sorted_idx[:-67]
-        
-        # Add non-empty groups
+
+        groups = []
         if body_kpts:
             groups.append(body_kpts)
-        if left_hand_kpts:
-            groups.append(left_hand_kpts)
-        if right_hand_kpts:
-            groups.append(right_hand_kpts)
-        if face_kpts:
-            groups.append(face_kpts)
-    else:
-        # Fallback: just use all as one group
-        groups.append(sorted_idx)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        groups.append(face_kpts)
+        return groups
     
-    return groups
+    # No face (>= 42 total): Pose/Body + Left Hand + Right Hand
+    if total_kpts >= 42:
+        body_count = total_kpts - 42
+        body_kpts = sorted_idx[:body_count] if body_count > 0 else []
+        left_hand_kpts = sorted_idx[body_count:body_count + 21]
+        right_hand_kpts = sorted_idx[body_count + 21:body_count + 42]
+
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        return groups
+    
+    # Fallback: single group
+    return [sorted_idx]
 
 
 def main(args):
@@ -440,8 +440,10 @@ def main(args):
     callbacks.append(reduce_lr_callback)
     
     # CSVLogger for training history
+    training_csv_dir = Path("logs/training_csv")
+    training_csv_dir.mkdir(parents=True, exist_ok=True)
     csv_logger = keras.callbacks.CSVLogger(
-        f'{args.experiment_name}_training.csv',
+        str(training_csv_dir / f"{args.experiment_name}_training.csv"),
         append=True
     )
     callbacks.append(csv_logger)
@@ -686,12 +688,16 @@ def main(args):
     plt.legend(loc="upper center", bbox_to_anchor=(0.5, 1.05), ncol=4, fancybox=True, shadow=True)
     ax.grid(True, alpha=0.3)
     
-    plot_path = "out-imgs/" + args.experiment_name + "_training_curves.png"
+    plot_path = "out-imgs/" + args.experiment_name + "/training_curves.png"
     fig.savefig(plot_path, bbox_inches='tight', dpi=100)
     plt.close()
     
     print(f"\nPlot saved to {plot_path}")
     logger.info("Experiment finished.")
+
+    # Clear GPU/TF resources
+    keras.backend.clear_session()
+    gc.collect()
 
 
 if __name__ == '__main__':

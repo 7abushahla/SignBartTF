@@ -18,39 +18,46 @@ import sys
 import json
 import yaml
 import glob
+import re
 from pathlib import Path
 from datetime import datetime
 import tensorflow as tf
 
-# Define LOSO configurations - includes 3 users
-LOSO_CONFIGS = [
-    {
-        "holdout_user": "user01",
-        "train_users": "user02-user12",
-        "experiment_name": "arabic_asl_LOSO_user01"
-    },
-    {
-        "holdout_user": "user08",
-        "train_users": "user01-07,user09-12",
-        "experiment_name": "arabic_asl_LOSO_user08"
-    },
-    {
-        "holdout_user": "user11",
-        "train_users": "user01-10,user12",
-        "experiment_name": "arabic_asl_LOSO_user11"
-    }
-]
+DEFAULT_HOLDOUTS = "user01,user08,user11"
 
 
-def check_data_exists(base_data_path):
+def check_data_exists(base_data_path, holdouts):
     """Check if LOSO data directories exist."""
     missing = []
-    for config in LOSO_CONFIGS:
-        holdout = config["holdout_user"]
+    for holdout in holdouts:
         loso_path = f"{base_data_path}_LOSO_{holdout}"
         if not os.path.exists(loso_path):
             missing.append(loso_path)
     return missing
+
+
+def discover_users(base_data_path):
+    """Discover user IDs from filenames in base_data_path/all/G??/*.pkl."""
+    all_glob = os.path.join(base_data_path, "all", "G??", "*.pkl")
+    users = set()
+    for p in glob.glob(all_glob):
+        bn = os.path.basename(p)
+        m = re.match(r"(user\d{2})_G\d{2}_R\d{2}\.pkl$", bn)
+        if m:
+            users.add(m.group(1))
+    return sorted(users)
+
+
+def build_loso_configs(holdouts, all_users):
+    configs = []
+    for holdout in holdouts:
+        train_users = [u for u in all_users if u != holdout]
+        configs.append({
+            "holdout_user": holdout,
+            "train_users": ",".join(train_users),
+            "experiment_name": f"arabic_asl_LOSO_{holdout}"
+        })
+    return configs
 
 
 def load_model_config(config_path):
@@ -152,8 +159,8 @@ def save_run_metadata(experiment_name, config, args, start_time, end_time, succe
         "seed": args.seed,
         "no_validation": args.no_validation,
         "success": success,
-        "log_file": f"{experiment_name}.log",
-        "eval_log_file": f"{experiment_name}_eval.log" if success else None,
+        "log_file": f"logs/run_logs/{experiment_name}.log",
+        "eval_log_file": f"logs/run_logs/{experiment_name}_eval.log" if success else None,
         "checkpoint_dir": f"checkpoints_{experiment_name}",
         "timestamp": end_time.timestamp(),
         "framework": "tensorflow"
@@ -213,7 +220,11 @@ def save_run_metadata(experiment_name, config, args, start_time, end_time, succe
 def run_training(config_path, data_path, experiment_name, epochs, lr, seed, 
                  pretrained_path="", no_validation=False, use_functional=False):
     """Run training for one LOSO configuration."""
-    main_script = "main_functional.py" if use_functional else "main.py"
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    main_script = os.path.join(
+        script_dir,
+        "main_functional.py" if use_functional else "main.py"
+    )
     cmd = [
         sys.executable, main_script,
         "--experiment_name", experiment_name,
@@ -269,7 +280,7 @@ def main():
                         help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=2e-4,
                         help="Learning rate")
-    parser.add_argument("--seed", type=int, default=379,
+    parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
     parser.add_argument("--pretrained_path", type=str, default="",
                         help="Path to pretrained model (.h5 file, optional)")
@@ -277,6 +288,8 @@ def main():
                         help="Skip training and only run evaluation")
     parser.add_argument("--holdout_only", type=str, default="",
                         help="Train only specific holdout user (e.g., 'user01', 'user02') - USE THIS TO TEST FIRST!")
+    parser.add_argument("--holdouts", type=str, default=DEFAULT_HOLDOUTS,
+                        help="Comma-separated holdout users or 'all' to use all users")
     parser.add_argument("--no_validation", action="store_true",
                         help="Disable validation during training (test evaluation will run after)")
     parser.add_argument("--skip_final_eval", action="store_true",
@@ -305,8 +318,16 @@ def main():
     else:
         print(f"[!] Warning: Could not load model configuration")
     
+    # Determine holdouts list
+    if args.holdouts.strip().lower() == "all":
+        all_users = discover_users(args.base_data_path)
+        holdouts = all_users
+    else:
+        holdouts = [u.strip() for u in args.holdouts.split(",") if u.strip()]
+        all_users = discover_users(args.base_data_path)
+
     # Check if data directories exist
-    missing = check_data_exists(args.base_data_path)
+    missing = check_data_exists(args.base_data_path, holdouts)
     if missing:
         print(f"ERROR: Missing LOSO data directories:")
         for path in missing:
@@ -315,7 +336,7 @@ def main():
         sys.exit(1)
     
     print(f"\n{'='*80}")
-    print(f"Arabic ASL LOSO Training (TensorFlow) - 3 users")
+    print(f"Arabic ASL LOSO Training (TensorFlow) - {len(holdouts)} users")
     print(f"{'='*80}")
     print(f"Config: {args.config_path}")
     print(f"Base data path: {args.base_data_path}")
@@ -338,12 +359,12 @@ def main():
     print(f"{'='*80}\n")
     
     # Filter configurations if specific holdout requested
-    configs_to_run = LOSO_CONFIGS
+    configs_to_run = build_loso_configs(holdouts, all_users)
     if args.holdout_only:
-        configs_to_run = [c for c in LOSO_CONFIGS if c["holdout_user"] == args.holdout_only]
+        configs_to_run = [c for c in configs_to_run if c["holdout_user"] == args.holdout_only]
         if not configs_to_run:
             print(f"ERROR: Invalid holdout user: {args.holdout_only}")
-            print(f"Valid options: user01, user08, user11")
+            print(f"Valid options: {', '.join(holdouts)}")
             sys.exit(1)
         print(f"[ℹ] TESTING MODE: Running only {args.holdout_only}")
         print(f"    Once this works, remove --holdout_only to run all 3 LOSO experiments\n")
@@ -418,12 +439,12 @@ def main():
     for result in results:
         exp_name = result["experiment"]
         print(f"\n{exp_name}:")
-        print(f"  - Log: {exp_name}.log")
+        print(f"  - Log: logs/run_logs/{exp_name}.log")
         if not args.skip_training:
-            print(f"  - Evaluation log: {exp_name}_eval.log")
+            print(f"  - Evaluation log: logs/run_logs/{exp_name}_eval.log")
         print(f"  - Metadata: training_metadata/{exp_name}_latest.json")
         print(f"  - Checkpoints: checkpoints_{exp_name}/")
-        print(f"  - Plots: out-imgs/{exp_name}_loss.png, out-imgs/{exp_name}_lr.png")
+        print(f"  - Plots: out-imgs/{exp_name}/training_curves.png")
     
     # Remind about next steps
     print(f"\n{'='*80}")

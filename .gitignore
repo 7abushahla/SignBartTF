@@ -1,1 +1,61 @@
+# SignBartTF .gitignore
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+/.vscode/
+.idea/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual envs
+venv/
+env/
+.venv/
+ENV/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs and temp
+*.log
+logs/
+tmp/
+temp/
+
+# Model checkpoints / exports
+checkpoints*/
+checkpoints_*/
+exports/
+exports/*
+models/
+models/*
+*.h5
+*.pt
+*.ckpt
+
+# Numpy / pickle / binary data (do NOT commit large dataset artifacts)
+*.pkl
+*.pickle
+*.npz
+*.npy
+
+# Video files and flipped variants
+*.mp4
+*MP4_FLIPPED*
+
+# Other generated data
+results/
+reports/
+
+# OS X DS_Store inside models (previously tracked)
+models/.DS_Store
 models/.DS_Store

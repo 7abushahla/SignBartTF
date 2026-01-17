@@ -21,7 +21,13 @@ TensorFlow/Keras implementation of SignBART for Arabic sign language gesture rec
 ```
 signbart_tf/
 ├── configs/
-│   └── arabic-asl-90kpts.yaml       # Model configuration (90 keypoints: body + hands + face)
+│   ├── arabic-asl-65kpts.yaml       # 65 keypoints (upper body + hands, no face)
+│   ├── arabic-asl-42kpts-hands.yaml # 42 keypoints (hands only)
+│   ├── arabic-asl-44kpts-hands-wrists.yaml
+│   ├── arabic-asl-44kpts-hands-shoulders.yaml
+│   ├── arabic-asl-46kpts-hands-shoulders-wrists.yaml
+│   ├── arabic-asl-48kpts-hands-shoulders-elbows-wrists.yaml
+│   └── arabic-asl-90kpts.yaml       # 90 keypoints (body + hands + face)
 ├── data/
 │   ├── arabic-asl-90kpts/           # Full dataset (all users)
 │   │   ├── all/                     # All samples for full training
@@ -33,7 +39,7 @@ signbart_tf/
 │   │   ├── test/                    # Test samples (user01)
 │   │   └── ...
 │   └── ...
-├── checkpoints_*/                   # Training checkpoints
+├── checkpoints_*/                   # Training checkpoints (variant-specific prefixes)
 ├── exports/                         # Quantized models
 │   ├── ptq_loso/                    # PTQ models (per user)
 │   ├── qat_loso/                    # QAT models (per user)
@@ -58,17 +64,73 @@ conda activate signbart_tf
 pip install tensorflow tensorflow-model-optimization keras pyyaml numpy matplotlib seaborn
 ```
 
-### 2. Training Workflows
+**MediaPipe extractor compatibility (required for keypoint extraction):**
+
+```bash
+# MediaPipe solutions API (used by extract_65_keypoints.py)
+pip install mediapipe==0.10.14
+
+# TensorFlow 2.15 compatibility pins
+pip install numpy==1.26.4 ml-dtypes==0.3.2
+
+# OpenCV contrib (MediaPipe dependency) pinned to numpy<2
+pip install opencv-contrib-python==4.9.0.80
+```
+
+### 2. Prepare 65-Keypoint Dataset (No Face)
+
+The raw videos are already available in:
+
+- MLR511-ArabicSignLanguage-Dataset-MP4/
+
+Use the 65-keypoint extractor to build the training dataset:
+
+```bash
+python extract_65_keypoints.py \
+    --input_dir MLR511-ArabicSignLanguage-Dataset-MP4 \
+    --output_dir data/arabic-asl-65kpts
+```
+
+This writes:
+
+- data/arabic-asl-65kpts/all/G01...G10/*.pkl
+- data/arabic-asl-65kpts/label2id.json
+- data/arabic-asl-65kpts/id2label.json
+
+Create LOSO splits for training/evaluation:
+
+```bash
+python fix_loso.py \
+    --base_root data/arabic-asl-65kpts \
+    --holdouts user01,user08,user11
+```
+
+Then train with the 65-keypoint config:
+
+```bash
+python train_loso_functional.py \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --base_data_path data/arabic-asl-65kpts \
+    --epochs 80 \
+    --lr 2e-4 \
+    --no_validation
+```
+
+Default seed is 42 (override with --seed as needed).
+
+---
+
+### 3. Training Workflows
 
 #### **LOSO Training (Recommended for Research)**
 
 Train on 3 LOSO splits (leave-one-signer-out):
 
 ```bash
-# All 3 users (user01, user08, user11)
+# All 3 users (user01, user08, user11) - 65 keypoints (no face)
 python train_loso_functional.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --base_data_path data/arabic-asl-90kpts \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --base_data_path data/arabic-asl-65kpts \
     --epochs 80 \
     --lr 2e-4 \
     --no_validation
@@ -80,13 +142,18 @@ python train_loso_functional.py \
 
 ```bash
 python train_loso_functional.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --base_data_path data/arabic-asl-90kpts \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --base_data_path data/arabic-asl-65kpts \
     --holdout_only user01 \
     --epochs 2 \
     --lr 2e-4 \
     --no_validation
 ```
+
+If you want the 90-keypoint variant (with face), replace the config and data paths with:
+
+- configs/arabic-asl-90kpts.yaml
+- data/arabic-asl-90kpts
 
 ---
 
@@ -96,8 +163,8 @@ Train on all 12 users:
 
 ```bash
 python train_full_dataset.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --base_data_path data/arabic-asl-90kpts \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --base_data_path data/arabic-asl-65kpts \
     --epochs 80 \
     --lr 2e-4 \
     --seed 42
@@ -107,7 +174,73 @@ python train_full_dataset.py \
 
 ---
 
-### 3. Quantization
+### 3b. End-to-End Pipeline (Flip → Extract → LOSO → Full Dataset)
+
+The pipeline runs dataset flipping, 65-keypoint extraction, LOSO training, and (optionally) full-dataset training:
+
+```bash
+bash run_end_to_end_pipeline.sh
+```
+
+Control full-dataset training:
+
+```bash
+# Skip full dataset training if already done
+RUN_FULL_DATASET=0 bash run_end_to_end_pipeline.sh
+```
+
+Optional overrides:
+
+```bash
+FULL_EPOCHS=80 FULL_LR=2e-4 FULL_SEED=42 FULL_EXP_NAME=arabic_asl_full \
+    bash run_end_to_end_pipeline.sh
+```
+
+### 3c. Variant Pipeline (Multiple Keypoint Subsets)
+
+Run multiple keypoint variants (hands-only, shoulders, wrists, etc.) and include 90-keypoint training:
+
+```bash
+bash run_end_to_end_variants.sh
+```
+
+Control which variants run:
+
+```bash
+VARIANTS="42kpts-hands 44kpts-hands-wrists 46kpts-hands-shoulders-wrists 65kpts 90kpts" \
+    bash run_end_to_end_variants.sh
+```
+
+Defaults for LOSO runs:
+
+- SEED_LIST=42,511,999983,1000003,324528439 (seed sweep)
+- HOLDOUTS=all (all users)
+- RUN_LOSO=1 (set RUN_LOSO=0 to skip LOSO for other datasets)
+
+Other dataset support (optional):
+
+```bash
+# Point to a different dataset root and skip LOSO if labels/users differ
+RAW_DIR=/path/to/your_dataset \
+FLIPPED_DIR=/path/to/your_dataset_flipped \
+DATA_DIR_65=/path/to/output_keypoints_65 \
+DATA_DIR_90=/path/to/output_keypoints_90 \
+RUN_LOSO=0 \
+bash run_end_to_end_variants.sh
+```
+
+Note: HOLDOUTS=all requires filenames like userXX_GYY_RZZ.pkl to discover users.
+
+The variant pipeline will:
+
+- Reuse the 65-keypoint dataset
+- Train LOSO models with an experiment prefix per variant
+- Export PTQ/QAT models to variant-specific export directories
+- Run collect_results with the correct prefix and export paths
+
+---
+
+### 4. Quantization
 
 #### **Post-Training Quantization (PTQ)**
 
@@ -116,20 +249,27 @@ Dynamic-range INT8 quantization (weights only):
 ```bash
 # For LOSO models (all 3 users)
 python ptq_export_batch.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --base_data_path data/arabic-asl-90kpts
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --base_data_path data/arabic-asl-65kpts
 
 # For single LOSO model (e.g., user01)
 python ptq_export.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
+    --config_path configs/arabic-asl-65kpts.yaml \
     --checkpoint checkpoints_arabic_asl_LOSO_user01/final_model.h5 \
     --output_dir exports/ptq_arabic_asl_user01
 
 # For full dataset model
 python ptq_export.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
+    --config_path configs/arabic-asl-65kpts.yaml \
     --checkpoint checkpoints_arabic_asl_full/final_model.h5 \
     --output_dir exports/ptq_full
+
+# For a keypoint variant (example)
+python ptq_export_batch.py \
+    --config_path configs/arabic-asl-42kpts-hands.yaml \
+    --base_data_path data/arabic-asl-65kpts \
+    --exp_prefix arabic_asl_42kpts_hands \
+    --output_base_dir exports/ptq_loso_arabic_asl_42kpts_hands
 ```
 
 ---
@@ -141,31 +281,42 @@ Fine-tune with simulated quantization (better accuracy than PTQ):
 ```bash
 # For LOSO models (all 3 users)
 python train_loso_functional_qat_batch.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --base_data_path data/arabic-asl-90kpts \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --base_data_path data/arabic-asl-65kpts \
     --batch_size 4 \
-    --qat_epochs 10 \
+    --qat_epochs 20 \
     --lr 5e-5 \
     --no_validation
 
 # For single LOSO model (e.g., user01)
 python train_loso_functional_qat.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --data_path data/arabic-asl-90kpts_LOSO_user01 \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --data_path data/arabic-asl-65kpts_LOSO_user01 \
     --checkpoint checkpoints_arabic_asl_LOSO_user01/final_model.h5 \
     --output_dir exports/qat_finetune_user01 \
     --batch_size 4 \
-    --qat_epochs 10 \
+    --qat_epochs 20 \
     --lr 5e-5
 
 # For full dataset model
 python train_loso_functional_qat.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --data_path data/arabic-asl-90kpts \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --data_path data/arabic-asl-65kpts \
     --checkpoint checkpoints_arabic_asl_full/final_model.h5 \
     --output_dir exports/qat_full \
     --batch_size 4 \
-    --qat_epochs 10 \
+    --qat_epochs 20 \
+    --lr 5e-5 \
+    --no_validation
+
+# For a keypoint variant (example)
+python train_loso_functional_qat_batch.py \
+    --config_path configs/arabic-asl-42kpts-hands.yaml \
+    --base_data_path data/arabic-asl-65kpts \
+    --exp_prefix arabic_asl_42kpts_hands \
+    --output_base_dir exports/qat_loso_arabic_asl_42kpts_hands \
+    --batch_size 4 \
+    --qat_epochs 20 \
     --lr 5e-5 \
     --no_validation
 ```
@@ -173,7 +324,7 @@ python train_loso_functional_qat.py \
 **QAT Configuration**:
 - **Learning Rate**: 5e-5 (~4× lower than FP32 training)
 - **Batch Size**: 4 (larger than training for stability)
-- **Epochs**: 10-20 (short fine-tuning)
+- **Epochs**: 20 (short fine-tuning)
 - **Quantized Layers**: All Dense layers (FFN, attention projections, projection layers)
 - **Excluded**: Projection container (tuple output handling issue)
 - **Gradient Clipping**: clipnorm=1.0
@@ -191,7 +342,7 @@ python run_qat_export.py \
 
 ---
 
-### 4. Evaluation
+### 5. Evaluation
 
 #### **Single Model Evaluation**
 
@@ -199,8 +350,8 @@ Evaluate any TFLite model on any dataset split:
 
 ```bash
 python evaluate_tflite_single.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --data_path data/arabic-asl-90kpts_LOSO_user01 \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --data_path data/arabic-asl-65kpts_LOSO_user01 \
     --split test \
     --tflite_path checkpoints_arabic_asl_full/final_model_fp32.tflite
 ```
@@ -214,16 +365,16 @@ Side-by-side comparison of all three quantization approaches:
 ```bash
 # Compare all three models
 python test_tflite_models.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --data_path data/arabic-asl-90kpts_LOSO_user01 \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --data_path data/arabic-asl-65kpts_LOSO_user01 \
     --fp32_tflite checkpoints_arabic_asl_LOSO_user01/final_model_fp32.tflite \
     --ptq_tflite exports/ptq_arabic_asl_user01/model_dynamic_int8.tflite \
     --qat_tflite exports/qat_finetune_user01/qat_dynamic_int8.tflite
 
 # Compare FP32 vs PTQ only
 python test_tflite_models.py \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --data_path data/arabic-asl-90kpts_LOSO_user01 \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --data_path data/arabic-asl-65kpts_LOSO_user01 \
     --fp32_tflite checkpoints_arabic_asl_LOSO_user01/final_model_fp32.tflite \
     --ptq_tflite exports/ptq_arabic_asl_user01/model_dynamic_int8.tflite
 ```
@@ -236,10 +387,10 @@ Detailed analysis of a single prediction (with raw keypoint dump):
 
 ```bash
 python test_single_sample.py \
-    --test_dir data/arabic-asl-90kpts_LOSO_user01/test \
+    --test_dir data/arabic-asl-65kpts_LOSO_user01/test \
     --tflite_model checkpoints_arabic_asl_LOSO_user01/final_model_fp32.tflite \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --sample_file data/arabic-asl-90kpts_LOSO_user01/test/G10/user01_G10_R10.pkl \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --sample_file data/arabic-asl-65kpts_LOSO_user01/test/G10/user01_G10_R10.pkl \
     --sample_label G10 \
     --dump_raw_sample raw_keypoints.json
 ```
@@ -253,12 +404,31 @@ Generate full report with confusion matrices, FLOPs, and accuracy tables:
 ```bash
 python collect_results.py \
     --run_evaluation \
-    --config_path configs/arabic-asl-90kpts.yaml \
-    --base_data_path data/arabic-asl-90kpts
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --base_data_path data/arabic-asl-65kpts
+
+# Multi-seed LOSO summary (mean/std across seeds)
+python collect_results.py \
+    --run_evaluation \
+    --config_path configs/arabic-asl-65kpts.yaml \
+    --base_data_path data/arabic-asl-65kpts \
+    --seed_list "42,511,999983,1000003,324528439" \
+    --exp_prefix_base arabic_asl_65kpts_pose_hands \
+    --ptq_base_dir "exports/ptq_loso_arabic_asl_65kpts_pose_hands_seed{seed}" \
+    --qat_base_dir "exports/qat_loso_arabic_asl_65kpts_pose_hands_seed{seed}"
+
+# Variant example (with exp_prefix + custom PTQ/QAT export dirs)
+python collect_results.py \
+    --run_evaluation \
+    --config_path configs/arabic-asl-42kpts-hands.yaml \
+    --base_data_path data/arabic-asl-65kpts \
+    --exp_prefix arabic_asl_42kpts_hands \
+    --ptq_base_dir exports/ptq_loso_arabic_asl_42kpts_hands \
+    --qat_base_dir exports/qat_loso_arabic_asl_42kpts_hands
 ```
 
 **Output**:
-- `results/report_YYYYMMDD_HHMMSS.txt` - Full text report
+- `results/experiment_results_YYYYMMDD_HHMMSS_*.txt` - Full text report
 - `results/confusion_matrices/*.png` - 9 confusion matrices (3 users × 3 models)
 - `results/model_info.csv` - Parameters, FLOPs
 - `results/summary_table.csv` - FP32 vs PTQ vs QAT comparison
@@ -266,10 +436,31 @@ python collect_results.py \
 
 ---
 
+## 📱 Deploy to Mobile (Android/iOS)
+
+Copy the exported TFLite model into the Flutter app assets and rebuild the app:
+
+```bash
+# Example: use QAT INT8 model for user01
+cp exports/qat_loso/user01/qat_dynamic_int8.tflite \
+    ../assets/models/final_model_qat_int8.tflite
+```
+
+For keypoint variants (custom exp_prefix export dirs), update the source path accordingly:
+
+```bash
+cp exports/qat_loso_arabic_asl_42kpts_hands/user01/qat_dynamic_int8.tflite \
+    ../assets/models/final_model_qat_int8.tflite
+```
+
+Then rebuild the Flutter app (Android/iOS) so the asset bundle includes the new model.
+
+---
+
 ## 📊 Model Architecture
 
 ```
-Input: Keypoints [T, 90, 2]
+Input: Keypoints [T, K, 2] (K from config, e.g., 65)
   ↓
 Projection Layer (proj_x1, proj_y1) → [T, d_model=144]
   ↓
