@@ -21,7 +21,7 @@ from dataset import SignDataset, create_data_loaders
 from model import SignBart
 from utils import (
     accuracy, top_k_accuracy, save_checkpoint, load_checkpoint,
-    count_model_parameters, get_keypoint_config
+    count_model_parameters, get_keypoint_config, setup_gpu
 )
 
 # TFLite fixed sequence length (based on dataset analysis)
@@ -301,17 +301,7 @@ def main(args):
     logger = setup_logging(args.experiment_name)
     
     # Setup GPU
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            device = f"GPU: {gpus}"
-        except RuntimeError as e:
-            logger.error(e)
-            device = "CPU"
-    else:
-        device = "CPU"
+    _, device = setup_gpu(logger)
     
     print(f"\n{'='*80}")
     print(f"Experiment: {args.experiment_name}")

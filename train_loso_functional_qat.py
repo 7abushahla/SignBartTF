@@ -28,6 +28,7 @@ import tensorflow_model_optimization as tfmot
 import yaml
 
 from dataset import SignDataset
+from utils import setup_gpu
 from model_functional import build_signbart_functional_with_dict_inputs, ExtractLastValidToken
 from model_functional_tflite import build_signbart_functional_tflite, ExtractLastValidTokenTFLite
 from tensorflow_model_optimization.python.core.quantization.keras.quantize_wrapper import QuantizeWrapper
@@ -207,9 +208,6 @@ class NoOpQuantizeConfig(tfmot.quantization.keras.QuantizeConfig):
     @classmethod
     def from_config(cls, config):
         return cls()
-
-    def get_config(self):
-        return {}
 
 
 CUSTOM_LAYER_TYPES = (
@@ -432,6 +430,7 @@ def export_dynamic_tflite(model, config, output_path):
 def main():
     args = parse_args()
     set_seed(args.seed)
+    setup_gpu()
     config = load_config(args.config_path)
     joint_groups = determine_keypoint_groups(config.get("joint_idx", []))
 
@@ -443,7 +442,6 @@ def main():
     # - LOSO layout: {data_path}/train, {data_path}/test
     # - Full-data layout: {data_path}/all only (no explicit train/test)
     train_dir = os.path.join(args.data_path, "train")
-    test_dir = os.path.join(args.data_path, "test")
     all_dir = os.path.join(args.data_path, "all")
     
     if os.path.isdir(train_dir):
@@ -491,8 +489,8 @@ def main():
         "proj_x1", "proj_y1",                            # Projection Dense layers (safe!)
     ]
     print(f"[QAT] Quantization filters: {dense_filters}")
-    print(f"  ℹ️  Quantizing all Dense layers (FFN + attention projections + projection layers)")
-    print(f"  ✓  Projection container excluded from wrapping (critical for stability)")
+    print("  ℹ️  Quantizing all Dense layers (FFN + attention projections + projection layers)")
+    print("  ✓  Projection container excluded from wrapping (critical for stability)")
     print("[SUMMARY] Base model before QAT annotation:")
     try:
         base_model.summary(line_length=96)
@@ -598,15 +596,15 @@ def main():
     callbacks.append(early_stop)
     
     print("\n[TRAIN] Starting QAT fine-tuning...")
-    print(f"  Learning rate scheduler: ReduceLROnPlateau")
+    print("  Learning rate scheduler: ReduceLROnPlateau")
     print(f"    Monitor: {'val_loss' if not args.no_validation else 'loss'}")
     print(f"    Factor: {args.scheduler_factor}")
     print(f"    Patience: {args.scheduler_patience}")
-    print(f"  Early stopping:")
+    print("  Early stopping:")
     print(f"    Monitor: {'val_loss' if not args.no_validation else 'loss'}")
     print(f"    Patience: {args.early_stop_patience} (gives model chance to train with reduced LR)")
     
-    history = qat_model.fit(
+    _ = qat_model.fit(
         train_ds,
         validation_data=None if (args.no_validation or test_ds is None) else test_ds,
         epochs=args.qat_epochs,

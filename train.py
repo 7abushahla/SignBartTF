@@ -16,7 +16,7 @@ from model import SignBart
 from dataset import create_data_loaders
 from utils import (
     accuracy, top_k_accuracy, save_checkpoint, load_checkpoint,
-    count_model_parameters, get_keypoint_config
+    count_model_parameters, get_keypoint_config, setup_gpu
 )
 
 
@@ -205,16 +205,7 @@ def main(args):
     logger.info(f"Config: {config}")
     
     # Setup GPU
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"Using GPU: {gpus}")
-        except RuntimeError as e:
-            logger.error(e)
-    else:
-        logger.info("No GPU found, using CPU")
+    setup_gpu(logger)
     
     # Get keypoint configuration
     joint_idx, joint_groups = get_keypoint_config(config['keypoint_config'])

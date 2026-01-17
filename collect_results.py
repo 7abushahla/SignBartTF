@@ -41,6 +41,7 @@ from encoder import Encoder, EncoderLayer
 from decoder import Decoder, DecoderLayer
 from attention import SelfAttention, CrossAttention, CausalSelfAttention
 from model_functional import ExtractLastValidToken
+from utils import setup_gpu
 
 # LOSO test users (fallback)
 TEST_USERS = ["user01", "user08", "user11"]
@@ -562,7 +563,8 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         joint_idx = None
     
     # Set device
-    print(f"  Device: {'GPU' if tf.config.list_physical_devices('GPU') else 'CPU'}")
+    _, device = setup_gpu()
+    print(f"  Device: {device}")
     
     # Find best checkpoint
     checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.h5')]

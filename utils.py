@@ -8,6 +8,35 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
+
+def setup_gpu(logger=None):
+    """Configure GPU usage if available and return (has_gpu, device_label)."""
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            message = f"Using GPU(s): {gpus}"
+            if logger:
+                logger.info(message)
+            else:
+                print(message)
+            return True, f"GPU: {gpus}"
+        except RuntimeError as e:
+            message = f"GPU setup failed, using CPU: {e}"
+            if logger:
+                logger.error(message)
+            else:
+                print(message)
+            return False, "CPU"
+
+    message = "No GPU found, using CPU"
+    if logger:
+        logger.info(message)
+    else:
+        print(message)
+    return False, "CPU"
+
 # MediaPipe Holistic keypoint structure
 total_body_idx = 33  # Pose landmarks: 0-32
 total_hand = 21      # Hand landmarks per hand: 21 each
