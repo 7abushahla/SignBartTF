@@ -343,6 +343,19 @@ def determine_keypoint_groups_90() -> List[List[int]]:
     ]
 
 
+def determine_keypoint_groups_63() -> List[List[int]]:
+    """
+    Return keypoint groups for 63-keypoint v2.1 configuration.
+    Pose subset (15) + Left hand (21) + Right hand (21) + Face subset (6).
+    """
+    return [
+        list(range(0, 15)),   # Pose subset: 0-14 (15 points)
+        list(range(15, 36)),  # Left hand: 15-35 (21 points)
+        list(range(36, 57)),  # Right hand: 36-56 (21 points)
+        list(range(57, 63)),  # Face subset: 57-62 (6 points)
+    ]
+
+
 def determine_keypoint_groups(config_joint_idx: List[int]) -> List[List[int]]:
     """
     Automatically determine keypoint groups from config joint_idx.
@@ -369,6 +382,21 @@ def determine_keypoint_groups(config_joint_idx: List[int]) -> List[List[int]]:
         left_hand_kpts = sorted_idx[-67:-46]
         body_kpts = sorted_idx[:-67]
         
+        if body_kpts:
+            groups.append(body_kpts)
+        if left_hand_kpts:
+            groups.append(left_hand_kpts)
+        if right_hand_kpts:
+            groups.append(right_hand_kpts)
+        if face_kpts:
+            groups.append(face_kpts)
+    elif total_kpts == 63:
+        # v2.1: Pose (15) + Left Hand (21) + Right Hand (21) + Face (6)
+        body_kpts = sorted_idx[:15]
+        left_hand_kpts = sorted_idx[15:36]
+        right_hand_kpts = sorted_idx[36:57]
+        face_kpts = sorted_idx[57:63]
+
         if body_kpts:
             groups.append(body_kpts)
         if left_hand_kpts:

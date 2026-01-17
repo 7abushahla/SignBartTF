@@ -61,8 +61,8 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="exports/qat_finetune")
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Batch size for QAT (default: 4, larger than training for stability)")
-    parser.add_argument("--qat_epochs", type=int, default=10,
-                        help="Number of QAT fine-tuning epochs (default: 10)")
+    parser.add_argument("--qat_epochs", type=int, default=20,
+                        help="Number of QAT fine-tuning epochs (default: 20)")
     parser.add_argument("--lr", type=float, default=5e-5,
                         help="Learning rate for QAT (default: 5e-5, ~4x lower than FP32 training)")
     parser.add_argument("--seed", type=int, default=42)
@@ -120,6 +120,20 @@ def determine_keypoint_groups(config_joint_idx):
         left_hand = sorted_idx[body_count:body_count + 21]
         right_hand = sorted_idx[body_count + 21:body_count + 42]
         face = sorted_idx[-25:]
+
+        if body:
+            groups.append(body)
+        groups.append(left_hand)
+        groups.append(right_hand)
+        groups.append(face)
+        return groups
+
+    # v2.1 (63 total): Pose(15) + Left Hand(21) + Right Hand(21) + Face(6)
+    if total == 63:
+        body = sorted_idx[:15]
+        left_hand = sorted_idx[15:36]
+        right_hand = sorted_idx[36:57]
+        face = sorted_idx[57:63]
 
         if body:
             groups.append(body)
@@ -419,7 +433,8 @@ def export_dynamic_tflite(model, config, output_path):
 
     tflite_bytes = converter.convert()
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    from utils import ensure_dir_safe
+    ensure_dir_safe(Path(output_path).parent)
     with open(output_path, "wb") as f:
         f.write(tflite_bytes)
 
@@ -435,7 +450,8 @@ def main():
     joint_groups = determine_keypoint_groups(config.get("joint_idx", []))
 
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    from utils import ensure_dir_safe
+    ensure_dir_safe(output_dir)
     
     print("[DATA] Preparing datasets...")
     # Detect dataset layout:

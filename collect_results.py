@@ -20,7 +20,6 @@ Usage:
 
 import os
 import re
-import json
 import yaml
 import numpy as np
 import tensorflow as tf
@@ -168,7 +167,6 @@ def calculate_flops(model, input_shape=(1, 64, 9, 2)):
         concrete_func = forward_pass.get_concrete_function()
         
         # Run profiler
-        from tensorflow.python.profiler.model_analyzer import profile
         from tensorflow.python.profiler.option_builder import ProfileOptionBuilder
         
         # Profile the graph
@@ -192,7 +190,7 @@ def calculate_flops(model, input_shape=(1, 64, 9, 2)):
             import keras_flops
             flops = keras_flops.get_flops(model, batch_size=1)
             return flops
-        except:
+        except Exception:
             return None
 
 
@@ -286,18 +284,13 @@ def determine_keypoint_groups(config_joint_idx):
     
     total_kpts = len(sorted_idx)
     
-    # Known structure: last 25 are face, previous 21 are right hand, previous 21 are left hand
+    # With face (90/100): Pose + Left Hand (21) + Right Hand (21) + Face (25)
     if total_kpts >= 67:  # At least some pose + 2 hands + face (21+21+25=67)
-        # Last 25: face
         face_kpts = sorted_idx[-25:]
-        # Previous 21: right hand  
         right_hand_kpts = sorted_idx[-46:-25]
-        # Previous 21: left hand
         left_hand_kpts = sorted_idx[-67:-46]
-        # Everything else: pose/body
         body_kpts = sorted_idx[:-67]
-        
-        # Add non-empty groups
+
         groups = []
         if body_kpts:
             groups.append(body_kpts)
@@ -308,9 +301,38 @@ def determine_keypoint_groups(config_joint_idx):
         if face_kpts:
             groups.append(face_kpts)
         return groups
-    else:
-        # Fallback: just use all as one group
-        return [sorted_idx]
+
+    # v2.1: Pose(15) + Left Hand(21) + Right Hand(21) + Face(6)
+    if total_kpts == 63:
+        body_kpts = sorted_idx[:15]
+        left_hand_kpts = sorted_idx[15:36]
+        right_hand_kpts = sorted_idx[36:57]
+        face_kpts = sorted_idx[57:63]
+
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        groups.append(face_kpts)
+        return groups
+
+    # 65 keypoints: Pose/Body + Left Hand + Right Hand
+    if total_kpts >= 42:
+        body_count = total_kpts - 42
+        body_kpts = sorted_idx[:body_count] if body_count > 0 else []
+        left_hand_kpts = sorted_idx[body_count:body_count + 21]
+        right_hand_kpts = sorted_idx[body_count + 21:body_count + 42]
+
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        return groups
+
+    # Fallback: just use all as one group
+    return [sorted_idx]
 
 
 def get_custom_objects():
@@ -343,7 +365,9 @@ def evaluate_seed_results(config_path, base_data_path, exp_prefix, test_users, p
     for user in test_users:
         exp_name = f"{exp_prefix}{user}"
         loso_data_path = f"{base_data_path}_LOSO_{user}"
-        checkpoint_dir = f"checkpoints_{exp_name}"
+        # Resolve checkpoint directory (handles both legacy and new naming)
+        from utils import resolve_checkpoint_dir
+        checkpoint_dir = resolve_checkpoint_dir(exp_name)
 
         results = evaluate_model_from_checkpoint(
             config_path,
@@ -354,7 +378,7 @@ def evaluate_seed_results(config_path, base_data_path, exp_prefix, test_users, p
         if results:
             all_results[user] = results
 
-        fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+        fp32_tflite_path = f"{checkpoint_dir}/final_model_fp32.tflite"
         if os.path.exists(fp32_tflite_path):
             fp32_res = evaluate_tflite_model(fp32_tflite_path, loso_data_path, config, user, "FP32")
             if fp32_res:
@@ -588,13 +612,13 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         checkpoint_type = "first_available"
     
     checkpoint_path = os.path.join(checkpoint_dir, checkpoint_file)
-    print(f"  Loading checkpoint: {checkpoint_file} ({checkpoint_type})")
+    print("  Loading checkpoint: {} ({})".format(checkpoint_file, checkpoint_type))
     
     # Load checkpoint
     try:
         custom_objects = get_custom_objects()
         model = keras.models.load_model(checkpoint_path, custom_objects=custom_objects)
-        print(f"  ✓ Checkpoint loaded successfully")
+        print("  ✓ Checkpoint loaded successfully")
     except Exception as e:
         print(f"  ✗ Error loading checkpoint: {e}")
         import traceback
@@ -602,7 +626,7 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         return None
     
     # Load test dataset
-    print(f"  Loading test dataset...")
+    print("  Loading test dataset...")
     try:
         test_datasets = SignDataset(data_path, "test", shuffle=False, joint_idxs=joint_idx)
         test_loader_raw = test_datasets.create_tf_dataset(batch_size=1, drop_remainder=False)
@@ -618,7 +642,7 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         
         test_loader = test_loader_raw.map(separate_labels)
         num_samples = len(test_datasets)
-        print(f"  ✓ Test dataset loaded: {num_samples} samples")
+        print("  ✓ Test dataset loaded: {} samples".format(num_samples))
     except Exception as e:
         print(f"  ✗ Error loading test dataset: {e}")
         import traceback
@@ -626,13 +650,13 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         return None
     
     # Run evaluation
-    print(f"  Running evaluation...")
+    print("  Running evaluation...")
     start_time = time.time()
     
     try:
         results = model.evaluate(test_loader, return_dict=True, verbose=1)
         inference_time = time.time() - start_time
-        print(f"  ✓ Evaluation complete in {inference_time:.2f}s")
+        print("  ✓ Evaluation complete in {:.2f}s".format(inference_time))
         
     except Exception as e:
         print(f"  ✗ Error during evaluation: {e}")
@@ -641,7 +665,7 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
         return None
     
     # Collect per-class accuracies
-    print(f"  Collecting per-class accuracies...")
+    print("  Collecting per-class accuracies...")
     
     per_class_acc = {}
     all_preds = []
@@ -668,7 +692,7 @@ def evaluate_model_from_checkpoint(config_path, data_path, checkpoint_dir, user)
             class_name = f"G{class_idx+1:02d}"
             per_class_acc[class_name] = class_acc
         
-        print(f"  ✓ Per-class accuracies collected")
+        print("  ✓ Per-class accuracies collected")
         
         # NOTE: Confusion matrix is NOT generated for .h5 checkpoint evaluation
         # Only TFLite evaluations generate confusion matrices (FP32, INT8-QAT, INT8-PTQ)
@@ -827,34 +851,54 @@ def resolve_log_path(exp_name):
     return preferred if os.path.exists(preferred) else legacy
 
 
-def calculate_per_class_statistics(all_results):
-    """Calculate detailed statistics for each gesture class across all users."""
+def calculate_per_class_statistics(all_results, test_users=None):
+    """Calculate detailed statistics for each gesture class across the provided test users.
+
+    Args:
+        all_results: dict mapping user -> results dict
+        test_users: list of users to include (defaults to TEST_USERS)
+    Returns:
+        dict mapping gesture -> statistics dict
+    """
+    if test_users is None:
+        test_users = TEST_USERS
+
     class_stats = {}
-    
+
     for gesture in GESTURE_CLASSES:
         accuracies = []
-        
+
         for user in test_users:
             results = all_results.get(user)
             if results and gesture in results.get('per_class_acc', {}):
                 acc = results['per_class_acc'][gesture] * 100
                 accuracies.append(acc)
-        
+
         if accuracies:
             class_stats[gesture] = {
-                'mean': np.mean(accuracies),
-                'std': np.std(accuracies),
-                'min': np.min(accuracies),
-                'max': np.max(accuracies),
+                'mean': float(np.mean(accuracies)),
+                'std': float(np.std(accuracies, ddof=0)),
+                'min': float(np.min(accuracies)),
+                'max': float(np.max(accuracies)),
                 'count': len(accuracies),
                 'values': accuracies
             }
-    
+
     return class_stats
 
 
-def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflite_results=None, flops_value=None, output_dir="results", test_users=None, ptq_base_dir="exports/ptq_loso", qat_base_dir="exports/qat_loso"):
-    """Save summary tables as CSV files."""
+def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflite_results=None, flops_value=None, output_dir="results", test_users=None, ptq_base_dir="exports/ptq_loso", qat_base_dir="exports/qat_loso", config_path=None):
+    """Save summary tables as CSV files.
+
+    Args:
+        all_results: dict of per-user results
+        ptq_results, qat_results, fp32_tflite_results: optional dicts with evaluation results
+        flops_value: precomputed FLOPs (optional)
+        output_dir: directory to write CSVs
+        test_users: list of users (defaults to TEST_USERS)
+        ptq_base_dir / qat_base_dir: locations for PTQ/QAT outputs
+        config_path: optional path to model config YAML used to count parameters
+    """
     os.makedirs(output_dir, exist_ok=True)
     
     if ptq_results is None:
@@ -885,9 +929,11 @@ def save_csv_summary(all_results, ptq_results=None, qat_results=None, fp32_tflit
         
         for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
-            
+            from utils import resolve_checkpoint_dir
+            checkpoint_dir = resolve_checkpoint_dir(exp_name)
+
             # FP32 TFLite results (use TFLite for consistency)
-            fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+            fp32_tflite_path = f"{checkpoint_dir}/final_model_fp32.tflite"
             fp32_acc = fp32_tflite_results.get(user, {}).get('test_acc', 0) * 100 if fp32_tflite_results.get(user) else 0
             fp32_size = fp32_tflite_results.get(user, {}).get('file_size_mb', 0) if fp32_tflite_results.get(user) else 0
             fp32_time_ms = fp32_tflite_results.get(user, {}).get('time_per_sample', 0) * 1000 if fp32_tflite_results.get(user) else 0
@@ -1275,11 +1321,12 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             elif run_evaluation:
                 # NEW: Load model and evaluate
                 loso_data_path = f"{base_data_path}_LOSO_{user}"
-                checkpoint_dir = f"checkpoints_{exp_name}"
-                
+                from utils import resolve_checkpoint_dir
+                checkpoint_dir = resolve_checkpoint_dir(exp_name)
+
                 results = evaluate_model_from_checkpoint(
-                    config_path, 
-                    loso_data_path, 
+                    config_path,
+                    loso_data_path,
                     checkpoint_dir,
                     user
                 )
@@ -1350,7 +1397,9 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
         for user in test_users:
             exp_name = f"{EXPERIMENT_PREFIX}{user}"
             loso_data_path = f"{base_data_path}_LOSO_{user}"
-            fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+            from utils import resolve_checkpoint_dir
+            checkpoint_dir = resolve_checkpoint_dir(exp_name)
+            fp32_tflite_path = f"{checkpoint_dir}/final_model_fp32.tflite"
             
             writer.writeln(f"Test Signer: {user.upper()}")
             
@@ -1578,7 +1627,9 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             loso_data_path = f"{base_data_path}_LOSO_{user}"
             
             # FP32 TFLite results (use TFLite for consistency)
-            fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+            from utils import resolve_checkpoint_dir
+            checkpoint_dir = resolve_checkpoint_dir(exp_name)
+            fp32_tflite_path = f"{checkpoint_dir}/final_model_fp32.tflite"
             fp32_acc = fp32_tflite_results.get(user, {}).get('test_acc', 0) * 100 if fp32_tflite_results.get(user) else 0
             fp32_size = fp32_tflite_results.get(user, {}).get('file_size_mb', 0) if fp32_tflite_results.get(user) else 0
             fp32_time_ms = fp32_tflite_results.get(user, {}).get('time_per_sample', 0) * 1000 if fp32_tflite_results.get(user) else 0
@@ -1670,7 +1721,9 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
                 fp32_tflite_sizes = []
                 for user in test_users:
                     exp_name = f"{EXPERIMENT_PREFIX}{user}"
-                    fp32_tflite_path = f"checkpoints_{exp_name}/final_model_fp32.tflite"
+                    from utils import resolve_checkpoint_dir
+                    checkpoint_dir = resolve_checkpoint_dir(exp_name)
+                    fp32_tflite_path = f"{checkpoint_dir}/final_model_fp32.tflite"
                     if os.path.exists(fp32_tflite_path):
                         fp32_tflite_sizes.append(os.path.getsize(fp32_tflite_path) / (1024**2))
                 avg_fp32_size = (sum(fp32_tflite_sizes) / len(fp32_tflite_sizes)) if fp32_tflite_sizes else 0
@@ -1786,6 +1839,7 @@ def generate_report(output_file=None, console=True, save_csv=True, run_evaluatio
             test_users=test_users,
             ptq_base_dir=ptq_base_dir_run,
             qat_base_dir=qat_base_dir_run,
+            config_path=config_path,
         )
         save_training_curves(all_results)
     

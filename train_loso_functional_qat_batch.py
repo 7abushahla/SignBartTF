@@ -62,7 +62,7 @@ Example usage:
                         help="Path to model config YAML")
     parser.add_argument("--base_data_path", type=str, required=True,
                         help="Base path to processed data (without _LOSO suffix)")
-    parser.add_argument("--qat_epochs", type=int, default=3,
+    parser.add_argument("--qat_epochs", type=int, default=20,
                         help="Number of QAT fine-tuning epochs")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Batch size for QAT training")
@@ -117,7 +117,9 @@ def discover_users(base_data_path):
 def check_prerequisites(base_data_path, user):
     """Check if required files exist for a LOSO user."""
     data_path = f"{base_data_path}_LOSO_{user}"
-    checkpoint_path = f"checkpoints_{EXPERIMENT_PREFIX}{user}/final_model.h5"
+    from utils import resolve_checkpoint_dir
+    ck_dir = resolve_checkpoint_dir(f"{EXPERIMENT_PREFIX}{user}")
+    checkpoint_path = f"{ck_dir}/final_model.h5"
     
     missing = []
     if not os.path.exists(data_path):

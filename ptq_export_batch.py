@@ -169,7 +169,8 @@ def export_tflite(model, config, output_path, dynamic_range=False):
     ]
 
     tflite_model = converter.convert()
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    from utils import ensure_dir_safe
+    ensure_dir_safe(Path(output_path).parent)
     with open(output_path, "wb") as f:
         f.write(tflite_model)
 
@@ -205,7 +206,8 @@ def export_ptq_for_user(config, user, checkpoint_path, output_dir):
         
         # Create output directory
         output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        from utils import ensure_dir_safe
+        ensure_dir_safe(output_path)
         
         # Export dynamic-range INT8 TFLite
         dynamic_path = output_path / "model_dynamic_int8.tflite"
@@ -266,8 +268,17 @@ def main():
         print(f"# Processing {i}/{len(users_to_run)}: {user.upper()}")
         print(f"{'#'*80}")
         
-        # Set up paths
-        checkpoint_path = f"checkpoints_{EXPERIMENT_PREFIX}{user}/final_model.h5"
+        # Set up paths (try computed prefix, but fall back to legacy naming)
+        computed_ckpt = f"checkpoints_{EXPERIMENT_PREFIX}{user}/final_model.h5"
+        legacy_ckpt = f"checkpoints_arabic_asl_LOSO_{user}/final_model.h5"
+        if os.path.exists(computed_ckpt):
+            checkpoint_path = computed_ckpt
+        elif os.path.exists(legacy_ckpt):
+            checkpoint_path = legacy_ckpt
+            print(f"  [WARN] Using legacy checkpoint path for {user}: {legacy_ckpt}")
+        else:
+            # Default to computed path (will be reported as missing below)
+            checkpoint_path = computed_ckpt
         output_dir = f"{args.output_base_dir}/{user}"
         
         # Export PTQ

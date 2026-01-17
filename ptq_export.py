@@ -22,6 +22,7 @@ from tensorflow import keras
 import yaml
 
 from model_functional import build_signbart_functional_with_dict_inputs, ExtractLastValidToken
+from utils import ensure_dir_safe
 from layers import Projection, ClassificationHead, PositionalEmbedding
 from encoder import Encoder, EncoderLayer
 from decoder import Decoder, DecoderLayer
@@ -117,7 +118,7 @@ def export_tflite(model, config, output_path, dynamic_range=False):
     ]
 
     tflite_model = converter.convert()
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir_safe(Path(output_path).parent)
     with open(output_path, "wb") as f:
         f.write(tflite_model)
 
@@ -140,7 +141,7 @@ def main():
     _ = trained_model(dummy, training=False)
 
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir_safe(output_dir)
 
     fp32_path = output_dir / "model_fp32.tflite"
     export_tflite(trained_model, config, fp32_path, dynamic_range=False)

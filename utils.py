@@ -7,6 +7,8 @@ import logging
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+from datetime import datetime
+import glob
 
 
 def setup_gpu(logger=None):
@@ -331,6 +333,16 @@ if __name__ == "__main__":
 upper_body_65_idx = list(range(0, 65))
 upper_body_65_groups = [list(range(0, 23)), list(range(23, 44)), list(range(44, 65))]
 
+# v2.1: Pose subset (15) + Left hand (21) + Right hand (21) + Face subset (6) = 63 keypoints
+# Pose indices correspond to selected pose landmarks; face indices are a small FaceMesh subset.
+upper_body_63_idx = list(range(0, 63))
+upper_body_63_groups = [
+    list(range(0, 15)),   # Pose subset (15)
+    list(range(15, 36)),  # Left hand (21)
+    list(range(36, 57)),  # Right hand (21)
+    list(range(57, 63)),  # Face subset (6)
+]
+
 # Add to the get_keypoint_config function by monkey-patching
 _original_get_keypoint_config = get_keypoint_config
 
@@ -342,4 +354,54 @@ def get_keypoint_config(config_name):
     """
     if config_name == 'upper_body_65':
         return (upper_body_65_idx, upper_body_65_groups)
+    if config_name == 'upper_body_63':
+        return (upper_body_63_idx, upper_body_63_groups)
+    if config_name == 'v2_1_63':
+        return (upper_body_63_idx, upper_body_63_groups)
     return _original_get_keypoint_config(config_name)
+
+
+def ensure_dir_safe(path):
+    """
+    Ensure a directory exists at `path`. If a non-directory file exists at the
+    path, rename it with a timestamp suffix and then create the directory.
+
+    Accepts either a string or a pathlib.Path.
+    """
+    from pathlib import Path
+    p = Path(path)
+    if p.exists() and not p.is_dir():
+        backup_name = str(p) + ".bak_" + datetime.now().strftime("%Y%m%dT%H%M%S")
+        print(f"Warning: A file exists at '{p}'. Renaming it to '{backup_name}' to create directory.")
+        try:
+            os.rename(str(p), backup_name)
+        except Exception as e:
+            raise
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_checkpoint_dir(exp_name_or_prefix_user: str):
+    """
+    Resolve a checkpoint directory for a given experiment name or prefix+user token.
+    Tries the direct `checkpoints_{exp_name_or_prefix_user}` first, then falls
+    back to any existing directory matching `checkpoints_*<user>` (useful when
+    experiments were named with/without keypoint-count prefixes).
+
+    Returns the directory path string (not guaranteed to exist).
+    """
+    from pathlib import Path
+    # Direct candidate
+    candidate = f"checkpoints_{exp_name_or_prefix_user}"
+    if Path(candidate).exists():
+        return candidate
+
+    # Try to extract trailing user token (e.g., user01) and find any checkpoints_* that ends with it
+    parts = exp_name_or_prefix_user.split("_")
+    if parts:
+        user_token = parts[-1]
+        matches = glob.glob(f"checkpoints_*{user_token}")
+        if matches:
+            return matches[0]
+
+    # As a last resort, return the original candidate (caller will handle missing files)
+    return candidate

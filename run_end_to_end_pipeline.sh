@@ -6,8 +6,31 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Paths
 RAW_DIR="${RAW_DIR:-"$ROOT_DIR/MLR511-ArabicSignLanguage-Dataset-MP4"}"
 FLIPPED_DIR="${FLIPPED_DIR:-"$ROOT_DIR/MLR511-ArabicSignLanguage-Dataset-MP4_FLIPPED"}"
-DATA_DIR="${DATA_DIR:-"$ROOT_DIR/data/arabic-asl-65kpts"}"
-CONFIG_PATH="${CONFIG_PATH:-"$ROOT_DIR/configs/arabic-asl-65kpts.yaml"}"
+KEYPOINTS_COUNT="${KEYPOINTS_COUNT:-63}"
+
+if [[ -z "${DATA_DIR:-}" ]]; then
+  case "$KEYPOINTS_COUNT" in
+    63) DATA_DIR="$ROOT_DIR/data/arabic-asl-63kpts" ;;
+    65) DATA_DIR="$ROOT_DIR/data/arabic-asl-65kpts" ;;
+    90) DATA_DIR="$ROOT_DIR/data/arabic-asl-90kpts" ;;
+    *)
+      echo "Unsupported KEYPOINTS_COUNT: $KEYPOINTS_COUNT" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [[ -z "${CONFIG_PATH:-}" ]]; then
+  case "$KEYPOINTS_COUNT" in
+    63) CONFIG_PATH="$ROOT_DIR/configs/arabic-asl-63kpts.yaml" ;;
+    65) CONFIG_PATH="$ROOT_DIR/configs/arabic-asl-65kpts.yaml" ;;
+    90) CONFIG_PATH="$ROOT_DIR/configs/arabic-asl-90kpts.yaml" ;;
+    *)
+      echo "Unsupported KEYPOINTS_COUNT: $KEYPOINTS_COUNT" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # Training settings
 HOLDOUT_ONLY="${HOLDOUT_ONLY:-""}"
@@ -22,6 +45,20 @@ FULL_EPOCHS="${FULL_EPOCHS:-$EPOCHS}"
 FULL_LR="${FULL_LR:-$LR}"
 FULL_SEED="${FULL_SEED:-$SEED}"
 FULL_EXP_NAME="${FULL_EXP_NAME:-arabic_asl_full}"
+
+# Quantization / conversion settings
+RUN_PTQ="${RUN_PTQ:-1}"
+RUN_QAT="${RUN_QAT:-1}"
+RUN_COLLECT="${RUN_COLLECT:-1}"
+
+QAT_EPOCHS="${QAT_EPOCHS:-20}"
+QAT_BATCH_SIZE="${QAT_BATCH_SIZE:-4}"
+QAT_LR="${QAT_LR:-5e-5}"
+
+PTQ_LOSO_DIR="${PTQ_LOSO_DIR:-exports/ptq_loso}"
+PTQ_FULL_DIR="${PTQ_FULL_DIR:-exports/ptq_full}"
+QAT_LOSO_DIR="${QAT_LOSO_DIR:-exports/qat_loso}"
+QAT_FULL_DIR="${QAT_FULL_DIR:-exports/qat_full}"
 
 # Flip settings
 FLIP_USERS="${FLIP_USERS:-"user01,user02"}"
@@ -130,8 +167,21 @@ extract_keypoints_if_needed() {
     return 0
   fi
 
-  log "Keypoint extraction: running extract_65_keypoints.py"
-  python "$ROOT_DIR/extract_65_keypoints.py" \
+  local extractor="${EXTRACT_SCRIPT:-}"
+  if [[ -z "$extractor" ]]; then
+    case "$KEYPOINTS_COUNT" in
+      63) extractor="$ROOT_DIR/extract_63_keypoints.py" ;;
+      65) extractor="$ROOT_DIR/extract_65_keypoints.py" ;;
+      90) extractor="$ROOT_DIR/extract_90_keypoints.py" ;;
+      *)
+        echo "Unsupported KEYPOINTS_COUNT: $KEYPOINTS_COUNT" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  log "Keypoint extraction: running $(basename "$extractor")"
+  python "$extractor" \
     --input_dir "$FLIPPED_DIR" \
     --output_dir "$DATA_DIR"
 }
@@ -188,9 +238,68 @@ train_full_dataset() {
 }
 
 evaluate_model() {
-  log "Evaluation: completed during training (see *_eval.log)."
-  log "If you want TFLite evaluation, set EVAL_TFLITE_PATH and rerun:"
-  log "  EVAL_TFLITE_PATH=/path/to/model.tflite"
+  if [[ "$RUN_COLLECT" != "1" ]]; then
+    log "Evaluation: disabled (RUN_COLLECT=$RUN_COLLECT)."
+    return 0
+  fi
+
+  log "Evaluation: running collect_results.py (default LOSO users)"
+  python "$ROOT_DIR/collect_results.py" \
+    --run_evaluation \
+    --config_path "$CONFIG_PATH" \
+    --base_data_path "$DATA_DIR" \
+    --ptq_base_dir "$PTQ_LOSO_DIR" \
+    --qat_base_dir "$QAT_LOSO_DIR"
+}
+
+run_ptq() {
+  if [[ "$RUN_PTQ" != "1" ]]; then
+    log "PTQ: disabled (RUN_PTQ=$RUN_PTQ)."
+    return 0
+  fi
+
+  log "PTQ (LOSO): exporting dynamic-range INT8 models"
+  python "$ROOT_DIR/ptq_export_batch.py" \
+    --config_path "$CONFIG_PATH" \
+    --base_data_path "$DATA_DIR" \
+    --holdouts "$HOLDOUTS" \
+    --output_base_dir "$PTQ_LOSO_DIR"
+
+  log "PTQ (Full dataset): exporting dynamic-range INT8 model"
+  python "$ROOT_DIR/ptq_export.py" \
+    --config_path "$CONFIG_PATH" \
+    --checkpoint "checkpoints_${FULL_EXP_NAME}/final_model.h5" \
+    --output_dir "$PTQ_FULL_DIR"
+}
+
+run_qat() {
+  if [[ "$RUN_QAT" != "1" ]]; then
+    log "QAT: disabled (RUN_QAT=$RUN_QAT)."
+    return 0
+  fi
+
+  log "QAT (LOSO): fine-tuning and export"
+  python "$ROOT_DIR/train_loso_functional_qat_batch.py" \
+    --config_path "$CONFIG_PATH" \
+    --base_data_path "$DATA_DIR" \
+    --holdouts "$HOLDOUTS" \
+    --output_base_dir "$QAT_LOSO_DIR" \
+    --qat_epochs "$QAT_EPOCHS" \
+    --batch_size "$QAT_BATCH_SIZE" \
+    --lr "$QAT_LR" \
+    --seed "$SEED"
+
+  log "QAT (Full dataset): fine-tuning and export"
+  python "$ROOT_DIR/train_loso_functional_qat.py" \
+    --config_path "$CONFIG_PATH" \
+    --data_path "$DATA_DIR" \
+    --checkpoint "checkpoints_${FULL_EXP_NAME}/final_model.h5" \
+    --output_dir "$QAT_FULL_DIR" \
+    --qat_epochs "$QAT_EPOCHS" \
+    --batch_size "$QAT_BATCH_SIZE" \
+    --lr "$QAT_LR" \
+    --seed "$SEED" \
+    --no_validation
 }
 
 main() {
@@ -200,6 +309,8 @@ main() {
   create_loso_if_needed
   train_model
   train_full_dataset
+  run_ptq
+  run_qat
   evaluate_model
   log "Pipeline complete."
 }

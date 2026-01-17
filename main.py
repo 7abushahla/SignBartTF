@@ -21,7 +21,7 @@ from dataset import SignDataset, create_data_loaders
 from model import SignBart
 from utils import (
     accuracy, top_k_accuracy, save_checkpoint, load_checkpoint,
-    count_model_parameters, get_keypoint_config, setup_gpu
+    count_model_parameters, get_keypoint_config, setup_gpu, ensure_dir_safe
 )
 
 # TFLite fixed sequence length (based on dataset analysis)
@@ -176,6 +176,21 @@ def determine_keypoint_groups(config_joint_idx):
         groups.append(face_kpts)
         return groups
     
+    # v2.1 (63 total): Pose(15) + Left Hand(21) + Right Hand(21) + Face(6)
+    if total_kpts == 63:
+        body_kpts = sorted_idx[:15]
+        left_hand_kpts = sorted_idx[15:36]
+        right_hand_kpts = sorted_idx[36:57]
+        face_kpts = sorted_idx[57:63]
+
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        groups.append(face_kpts)
+        return groups
+
     # No face (>= 42 total): Pose/Body + Left Hand + Right Hand
     if total_kpts >= 42:
         body_count = total_kpts - 42
@@ -335,9 +350,10 @@ def main(args):
             elif i == 2 and group_size == 21:
                 # Third group of 21 points is right hand
                 name = f"right hand (indices {group[0]}-{group[-1]}, {group_size} keypoints)"
-            elif i == 3 and group_size == 25:
-                # Fourth group of 25 points is face
-                name = f"face (indices {group[0]}-{group[-1]}, {group_size} keypoints)"
+            elif i == 3 and group_size in (25, 6):
+                # Fourth group is face (full or subset)
+                label = "face" if group_size == 25 else "face subset"
+                name = f"{label} (indices {group[0]}-{group[-1]}, {group_size} keypoints)"
             else:
                 # Fallback for unexpected structure
                 name = f"group {i+1} (indices {group[0]}-{group[-1]}, {group_size} keypoints)"
@@ -517,9 +533,9 @@ def main(args):
     )
     callbacks.append(tensorboard_callback)
     
-    # Create directories
-    Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
-    Path("out-imgs/" + args.experiment_name + "/").mkdir(parents=True, exist_ok=True)
+    # Create directories safely
+    ensure_dir_safe(checkpoint_dir)
+    ensure_dir_safe(str(Path("out-imgs") / args.experiment_name))
     
     print(f"Checkpoint directory: {checkpoint_dir}")
     print(f"Output images directory: out-imgs/{args.experiment_name}/\n")

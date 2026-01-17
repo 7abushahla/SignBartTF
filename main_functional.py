@@ -16,6 +16,7 @@ import matplotlib.ticker as ticker
 import time
 from pathlib import Path
 from datetime import datetime
+import json
 
 from dataset import SignDataset, create_data_loaders
 from model_functional import build_signbart_functional_with_dict_inputs
@@ -192,6 +193,21 @@ def determine_keypoint_groups(config_joint_idx):
         groups.append(face_kpts)
         return groups
     
+    # v2.1 (63 total): Pose(15) + Left Hand(21) + Right Hand(21) + Face(6)
+    if total_kpts == 63:
+        body_kpts = sorted_idx[:15]
+        left_hand_kpts = sorted_idx[15:36]
+        right_hand_kpts = sorted_idx[36:57]
+        face_kpts = sorted_idx[57:63]
+
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        groups.append(face_kpts)
+        return groups
+
     # No face (>= 42 total): Pose/Body + Left Hand + Right Hand
     if total_kpts >= 42:
         body_count = total_kpts - 42
@@ -251,9 +267,10 @@ def main(args):
             elif i == 2 and group_size == 21:
                 # Third group of 21 points is right hand
                 name = f"right hand (indices {group[0]}-{group[-1]}, {group_size} keypoints)"
-            elif i == 3 and group_size == 25:
-                # Fourth group of 25 points is face
-                name = f"face (indices {group[0]}-{group[-1]}, {group_size} keypoints)"
+            elif i == 3 and group_size in (25, 6):
+                # Fourth group is face (full or subset)
+                label = "face" if group_size == 25 else "face subset"
+                name = f"{label} (indices {group[0]}-{group[-1]}, {group_size} keypoints)"
             else:
                 # Fallback for unexpected structure
                 name = f"group {i+1} (indices {group[0]}-{group[-1]}, {group_size} keypoints)"
@@ -447,12 +464,40 @@ def main(args):
     )
     callbacks.append(tensorboard_callback)
     
-    # Create directories
-    Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
-    Path("out-imgs/" + args.experiment_name + "/").mkdir(parents=True, exist_ok=True)
+    # Create directories (handle case where a file exists with same name)
+    ckpt_path = Path(checkpoint_dir)
+    if ckpt_path.exists() and not ckpt_path.is_dir():
+        backup_name = str(ckpt_path) + ".bak_" + datetime.now().strftime("%Y%m%dT%H%M%S")
+        print(f"Warning: A file exists at '{ckpt_path}'. Renaming it to '{backup_name}' to create checkpoint directory.")
+        try:
+            os.rename(str(ckpt_path), backup_name)
+        except Exception as e:
+            print(f"Error: Could not rename existing file at checkpoint path: {e}")
+            raise
+
+    ckpt_path.mkdir(parents=True, exist_ok=True)
+    out_imgs_path = Path("out-imgs") / args.experiment_name
+    out_imgs_path.mkdir(parents=True, exist_ok=True)
     
     print(f"Checkpoint directory: {checkpoint_dir}")
     print(f"Output images directory: out-imgs/{args.experiment_name}/\n")
+
+    # Save basic metadata about this run (including number of keypoints)
+    try:
+        metadata = {
+            'experiment_name': args.experiment_name,
+            'config_path': args.config_path,
+            'data_path': args.data_path,
+            'num_keypoints': len(config.get('joint_idx', [])),
+            'timestamp': datetime.now().isoformat()
+        }
+        metadata_path = ckpt_path / "metadata.json"
+        with open(metadata_path, 'w') as mf:
+            json.dump(metadata, mf, indent=2)
+        print(f"Saved run metadata to: {metadata_path}")
+        logger.info(f"Run metadata saved: {metadata}")
+    except Exception as e:
+        print(f"Warning: Could not write metadata file: {e}")
     
     # Evaluation mode
     if args.task == "eval":

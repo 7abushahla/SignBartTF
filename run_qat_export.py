@@ -30,6 +30,7 @@ from encoder import Encoder, EncoderLayer
 from decoder import Decoder, DecoderLayer
 from attention import SelfAttention, CrossAttention, CausalSelfAttention
 from model_functional_tflite import build_signbart_functional_tflite, ExtractLastValidTokenTFLite
+from utils import ensure_dir_safe
 # TFLite sequence length (matches training script)
 MAX_SEQ_LEN = 64
 
@@ -112,7 +113,7 @@ def export_fp32_tflite(model, config, output_path):
 
     tflite_model = converter.convert()
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir_safe(Path(output_path).parent)
     with open(output_path, "wb") as f:
         f.write(tflite_model)
 
@@ -462,7 +463,7 @@ def main():
     model = build_functional_model(config)
 
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir_safe(output_dir)
 
     if args.save_keras:
         fp32_path = output_dir / "signbart_fp32.keras"
