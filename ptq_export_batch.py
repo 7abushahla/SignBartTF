@@ -30,6 +30,7 @@ from tensorflow import keras
 import yaml
 
 from model_functional import build_signbart_functional_with_dict_inputs, ExtractLastValidToken
+from utils import resolve_checkpoint_dir
 from layers import Projection, ClassificationHead, PositionalEmbedding
 from encoder import Encoder, EncoderLayer
 from decoder import Decoder, DecoderLayer
@@ -242,6 +243,24 @@ def main():
     else:
         users_to_run = [u.strip() for u in args.holdouts.split(",") if u.strip()]
 
+    # If using holdouts=all, skip users without a trained checkpoint.
+    skipped_users = []
+    if args.holdouts.strip().lower() == "all":
+        filtered_users = []
+        for user in users_to_run:
+            ck_dir = resolve_checkpoint_dir(f"{EXPERIMENT_PREFIX}{user}")
+            ckpt = os.path.join(ck_dir, "final_model.h5")
+            if os.path.exists(ckpt):
+                filtered_users.append(user)
+            else:
+                skipped_users.append(user)
+        users_to_run = filtered_users
+        if skipped_users:
+            print(f"[WARN] Skipping users without checkpoints: {', '.join(skipped_users)}")
+        if not users_to_run:
+            print("[ERROR] No users with checkpoints were found for PTQ export.")
+            sys.exit(1)
+
     # Filter users if holdout_only specified
     if args.holdout_only:
         if args.holdout_only not in users_to_run:
@@ -268,17 +287,9 @@ def main():
         print(f"# Processing {i}/{len(users_to_run)}: {user.upper()}")
         print(f"{'#'*80}")
         
-        # Set up paths (try computed prefix, but fall back to legacy naming)
-        computed_ckpt = f"checkpoints_{EXPERIMENT_PREFIX}{user}/final_model.h5"
-        legacy_ckpt = f"checkpoints_arabic_asl_LOSO_{user}/final_model.h5"
-        if os.path.exists(computed_ckpt):
-            checkpoint_path = computed_ckpt
-        elif os.path.exists(legacy_ckpt):
-            checkpoint_path = legacy_ckpt
-            print(f"  [WARN] Using legacy checkpoint path for {user}: {legacy_ckpt}")
-        else:
-            # Default to computed path (will be reported as missing below)
-            checkpoint_path = computed_ckpt
+        # Set up paths (resolve actual checkpoint directory)
+        ck_dir = resolve_checkpoint_dir(f"{EXPERIMENT_PREFIX}{user}")
+        checkpoint_path = os.path.join(ck_dir, "final_model.h5")
         output_dir = f"{args.output_base_dir}/{user}"
         
         # Export PTQ
@@ -310,6 +321,10 @@ def main():
         print(f"\nFailed: {len(failed)}/{len(results)}")
         for r in failed:
             print(f"  ✗ {r['user']}")
+    if skipped_users:
+        print(f"\nSkipped (no checkpoint): {len(skipped_users)}")
+        for user in skipped_users:
+            print(f"  - {user}")
     
     print("\n" + "="*80)
     print("Output directories:")

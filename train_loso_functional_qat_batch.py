@@ -147,7 +147,9 @@ def run_qat_for_user(args, user):
     
     # Set up paths
     data_path = f"{args.base_data_path}_LOSO_{user}"
-    checkpoint_path = f"checkpoints_{EXPERIMENT_PREFIX}{user}/final_model.h5"
+    from utils import resolve_checkpoint_dir
+    ck_dir = resolve_checkpoint_dir(f"{EXPERIMENT_PREFIX}{user}")
+    checkpoint_path = f"{ck_dir}/final_model.h5"
     output_dir = f"{args.output_base_dir}/{user}"
     
     print(f"[INFO] User: {user}")

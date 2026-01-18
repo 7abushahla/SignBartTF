@@ -38,6 +38,7 @@ EPOCHS="${EPOCHS:-80}"
 LR="${LR:-2e-4}"
 SEED="${SEED:-42}"
 NO_VALIDATION="${NO_VALIDATION:-1}"
+RUN_LOSO="${RUN_LOSO:-1}"
 
 # Full-dataset (non-LOSO) training settings
 RUN_FULL_DATASET="${RUN_FULL_DATASET:-1}"
@@ -187,19 +188,48 @@ extract_keypoints_if_needed() {
 }
 
 create_loso_if_needed() {
-  local loso_dir="${DATA_DIR}_LOSO_user01"
-  if [[ -d "$loso_dir/train" ]] && [[ -d "$loso_dir/test" ]]; then
-    log "LOSO splits: already present, skipping."
-    return 0
+  local holdouts_csv
+  if [[ "$HOLDOUTS" == "all" ]]; then
+    if [[ ! -d "$DATA_DIR/all" ]]; then
+      echo "Missing $DATA_DIR/all for holdout discovery" >&2
+      exit 1
+    fi
+    holdouts_csv=$(find "$DATA_DIR/all" -type f -name "*.pkl" -maxdepth 2 -print0 \
+      | xargs -0 -n1 basename \
+      | awk -F_ '{print $1}' \
+      | sort -u \
+      | tr '\n' ',' \
+      | sed 's/,$//')
+  else
+    holdouts_csv="$HOLDOUTS"
   fi
 
-  log "LOSO splits: running fix_loso.py"
-  python "$ROOT_DIR/fix_loso.py" \
-    --base_root "$DATA_DIR" \
-    --holdouts "$HOLDOUTS"
+  if [[ -z "$holdouts_csv" ]]; then
+    echo "No holdouts found for LOSO." >&2
+    exit 1
+  fi
+
+  IFS=',' read -r -a holdouts <<< "$holdouts_csv"
+  for holdout in "${holdouts[@]}"; do
+    loso_dir="${DATA_DIR}_LOSO_${holdout}"
+    if [[ ! -d "$loso_dir/train" ]] || [[ ! -d "$loso_dir/test" ]]; then
+      log "LOSO splits: missing ${holdout}, regenerating."
+      python "$ROOT_DIR/fix_loso.py" \
+        --base_root "$DATA_DIR" \
+        --holdouts "$holdouts_csv"
+      return 0
+    fi
+  done
+
+  log "LOSO splits: already present for all holdouts, skipping."
 }
 
 train_model() {
+  if [[ "$RUN_LOSO" != "1" ]]; then
+    log "LOSO training: disabled (RUN_LOSO=$RUN_LOSO)."
+    return 0
+  fi
+
   log "Training: starting"
   cmd=(
     python "$ROOT_DIR/train_loso_functional.py"
@@ -212,6 +242,9 @@ train_model() {
 
   if [[ -n "$HOLDOUT_ONLY" ]]; then
     cmd+=(--holdout_only "$HOLDOUT_ONLY")
+  fi
+  if [[ -n "$HOLDOUTS" ]]; then
+    cmd+=(--holdouts "$HOLDOUTS")
   fi
 
   if [[ "$NO_VALIDATION" == "1" ]]; then
@@ -242,6 +275,10 @@ evaluate_model() {
     log "Evaluation: disabled (RUN_COLLECT=$RUN_COLLECT)."
     return 0
   fi
+  if [[ "$RUN_LOSO" != "1" ]]; then
+    log "Evaluation: skipped (RUN_LOSO=$RUN_LOSO)."
+    return 0
+  fi
 
   log "Evaluation: running collect_results.py (default LOSO users)"
   python "$ROOT_DIR/collect_results.py" \
@@ -258,12 +295,16 @@ run_ptq() {
     return 0
   fi
 
-  log "PTQ (LOSO): exporting dynamic-range INT8 models"
-  python "$ROOT_DIR/ptq_export_batch.py" \
-    --config_path "$CONFIG_PATH" \
-    --base_data_path "$DATA_DIR" \
-    --holdouts "$HOLDOUTS" \
-    --output_base_dir "$PTQ_LOSO_DIR"
+  if [[ "$RUN_LOSO" == "1" ]]; then
+    log "PTQ (LOSO): exporting dynamic-range INT8 models"
+    python "$ROOT_DIR/ptq_export_batch.py" \
+      --config_path "$CONFIG_PATH" \
+      --base_data_path "$DATA_DIR" \
+      --holdouts "$HOLDOUTS" \
+      --output_base_dir "$PTQ_LOSO_DIR"
+  else
+    log "PTQ (LOSO): skipped (RUN_LOSO=$RUN_LOSO)."
+  fi
 
   log "PTQ (Full dataset): exporting dynamic-range INT8 model"
   python "$ROOT_DIR/ptq_export.py" \
@@ -278,16 +319,20 @@ run_qat() {
     return 0
   fi
 
-  log "QAT (LOSO): fine-tuning and export"
-  python "$ROOT_DIR/train_loso_functional_qat_batch.py" \
-    --config_path "$CONFIG_PATH" \
-    --base_data_path "$DATA_DIR" \
-    --holdouts "$HOLDOUTS" \
-    --output_base_dir "$QAT_LOSO_DIR" \
-    --qat_epochs "$QAT_EPOCHS" \
-    --batch_size "$QAT_BATCH_SIZE" \
-    --lr "$QAT_LR" \
-    --seed "$SEED"
+  if [[ "$RUN_LOSO" == "1" ]]; then
+    log "QAT (LOSO): fine-tuning and export"
+    python "$ROOT_DIR/train_loso_functional_qat_batch.py" \
+      --config_path "$CONFIG_PATH" \
+      --base_data_path "$DATA_DIR" \
+      --holdouts "$HOLDOUTS" \
+      --output_base_dir "$QAT_LOSO_DIR" \
+      --qat_epochs "$QAT_EPOCHS" \
+      --batch_size "$QAT_BATCH_SIZE" \
+      --lr "$QAT_LR" \
+      --seed "$SEED"
+  else
+    log "QAT (LOSO): skipped (RUN_LOSO=$RUN_LOSO)."
+  fi
 
   log "QAT (Full dataset): fine-tuning and export"
   python "$ROOT_DIR/train_loso_functional_qat.py" \
