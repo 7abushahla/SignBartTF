@@ -59,3 +59,5 @@ reports/
 # OS X DS_Store inside models (previously tracked)
 models/.DS_Store
 models/.DS_Store
+data/.DS_Store
+.DS_Store
