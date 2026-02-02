@@ -25,17 +25,36 @@ import os
 from pathlib import Path
 import pickle
 from typing import Iterable, List, Tuple
+import warnings
+import contextlib
+import sys
+import os as _os
 
 import cv2
-import mediapipe as mp
 import numpy as np
 from tqdm import tqdm
 import multiprocessing as mp_ctx
 
-# Initialize MediaPipe modules (safe to import at module level)
-mp_holistic = mp.solutions.holistic
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+# -----------------------------------------------------------------------------
+# Logging / warning suppression (for cleaner multiprocessing output)
+# -----------------------------------------------------------------------------
+
+# Reduce TensorFlow / Mediapipe C++ log spam
+os.environ.setdefault("GLOG_minloglevel", "2")      # 0=INFO,1=WARNING,2=ERROR,3=FATAL
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # 0=all, 1=INFO, 2=WARNING, 3=ERROR
+
+# Suppress known protobuf deprecation warnings from Mediapipe
+warnings.filterwarnings(
+    "ignore",
+    message="SymbolDatabase.GetPrototype\\(\\) is deprecated",
+    category=UserWarning,
+)
+
+# NOTE: We intentionally do NOT import mediapipe at module import time.
+# In multiprocessing ("spawn"), each worker imports this module; MediaPipe/TFLite may emit
+# noisy C++ logs during import/initialization. To reliably silence those logs, we need
+# to redirect the OS-level stderr FD *before* importing/initializing MediaPipe inside
+# the worker (see `_redirect_stderr_fd` + `_get_mediapipe_modules`).
 
 # Pose subset indices (15 total) - in this exact order
 POSE_SUBSET_INDICES = [0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -45,6 +64,81 @@ FACE_SUBSET_INDICES = [10, 338, 297, 67, 234, 454]
 
 # Total keypoints: 63
 NUM_KEYPOINTS = 63
+
+
+@contextlib.contextmanager
+def _suppress_stderr(enabled: bool):
+    """
+    Best-effort suppression of noisy C++ logs that bypass Python logging.
+
+    WARNING: When enabled, this will also hide genuine errors printed to stderr
+    during the suppressed region. Keep it OFF unless you're sure things are stable.
+    """
+    if not enabled:
+        yield
+        return
+
+    try:
+        with open(os.devnull, "w") as devnull:
+            old_stderr = sys.stderr
+            sys.stderr = devnull
+            yield
+    finally:
+        try:
+            sys.stderr = old_stderr  # type: ignore[name-defined]
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def _redirect_stderr_fd(enabled: bool):
+    """
+    Redirect OS-level stderr (fd=2) to /dev/null for native/C++ logs.
+
+    This is the *only* reliable way to silence some MediaPipe/TFLite logs.
+    WARNING: This will also hide genuine native errors printed to stderr during
+    the suppressed region.
+    """
+    if not enabled:
+        yield
+        return
+
+    saved_fd = None
+    devnull_fd = None
+    try:
+        saved_fd = _os.dup(2)
+        devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+        _os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        try:
+            if saved_fd is not None:
+                _os.dup2(saved_fd, 2)
+        finally:
+            if devnull_fd is not None:
+                _os.close(devnull_fd)
+            if saved_fd is not None:
+                _os.close(saved_fd)
+
+
+def _get_mediapipe_modules(suppress_stderr: bool):
+    """
+    Import mediapipe and configure absl verbosity, optionally with stderr suppression.
+
+    Returns:
+        mp_holistic: mp.solutions.holistic
+    """
+    with _redirect_stderr_fd(suppress_stderr), _suppress_stderr(suppress_stderr):
+        try:
+            from absl import logging as absl_logging
+
+            absl_logging.set_verbosity(absl_logging.ERROR)
+        except Exception:
+            pass
+
+        import mediapipe as mp  # local import on purpose
+
+        return mp.solutions.holistic
 
 
 def extract_keypoints_from_results(results):
@@ -84,7 +178,7 @@ def extract_keypoints_from_results(results):
     return keypoints
 
 
-def process_video(video_path: str, min_confidence: float) -> np.ndarray:
+def process_video(video_path: str, min_confidence: float, suppress_stderr: bool) -> np.ndarray:
     """
     Process a single video and extract keypoints from all frames.
 
@@ -94,24 +188,30 @@ def process_video(video_path: str, min_confidence: float) -> np.ndarray:
     cap = cv2.VideoCapture(video_path)
     keypoints_sequence: List[np.ndarray] = []
 
-    # Each call creates its own Holistic instance in this process.
-    with mp_holistic.Holistic(
-        min_detection_confidence=min_confidence,
-        min_tracking_confidence=min_confidence,
-        model_complexity=1,
-    ) as holistic:
-        while cap.isOpened():
-            success, image = cap.read()
-            if not success:
-                break
+    # Import/init MediaPipe Holistic inside the worker, optionally suppressing native stderr
+    # so we catch the noisy C++ logs that happen during initialization.
+    mp_holistic = _get_mediapipe_modules(suppress_stderr=suppress_stderr)
 
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            image_rgb.flags.writeable = False
+    # Some MediaPipe/TFLite warnings are emitted to stderr from C++ during runtime too;
+    # wrap the whole processing section.
+    with _redirect_stderr_fd(suppress_stderr), _suppress_stderr(suppress_stderr):
+        with mp_holistic.Holistic(
+            min_detection_confidence=min_confidence,
+            min_tracking_confidence=min_confidence,
+            model_complexity=1,
+        ) as holistic:
+            while cap.isOpened():
+                success, image = cap.read()
+                if not success:
+                    break
 
-            results = holistic.process(image_rgb)
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                image_rgb.flags.writeable = False
 
-            keypoints = extract_keypoints_from_results(results)
-            keypoints_sequence.append(keypoints)
+                results = holistic.process(image_rgb)
+
+                keypoints = extract_keypoints_from_results(results)
+                keypoints_sequence.append(keypoints)
 
     cap.release()
     return np.array(keypoints_sequence, dtype=np.float32)
@@ -171,12 +271,15 @@ def _worker_process_video(args: Tuple[str, str, str, str, float]) -> Tuple[str, 
     Returns:
         (user_id, gesture_class, video_filename, num_frames)
     """
-    video_path, user_id, gesture_class, output_root_str, min_confidence = args
+    video_path, user_id, gesture_class, output_root_str, min_confidence, suppress_stderr = args
     output_root = Path(output_root_str)
     output_path = output_root / "all" / gesture_class
     output_path.mkdir(parents=True, exist_ok=True)
 
-    keypoints = process_video(video_path, min_confidence)
+    # If requested, redirect stderr FD for the entire worker task so we also suppress
+    # logs emitted during MediaPipe import/initialization in this worker.
+    with _redirect_stderr_fd(bool(suppress_stderr)), _suppress_stderr(bool(suppress_stderr)):
+        keypoints = process_video(video_path, min_confidence, suppress_stderr=bool(suppress_stderr))
 
     video_file = Path(video_path)
     output_filename = f"{user_id}_{gesture_class}_{video_file.stem}.pkl"
@@ -192,7 +295,13 @@ def _worker_process_video(args: Tuple[str, str, str, str, float]) -> Tuple[str, 
     return user_id, gesture_class, video_file.name, int(keypoints.shape[0])
 
 
-def process_dataset_mp(input_dir: str, output_dir: str, min_confidence: float, num_workers: int):
+def process_dataset_mp(
+    input_dir: str,
+    output_dir: str,
+    min_confidence: float,
+    num_workers: int,
+    suppress_stderr: bool,
+):
     """
     Process all videos in the input directory using multiprocessing.
     """
@@ -206,7 +315,7 @@ def process_dataset_mp(input_dir: str, output_dir: str, min_confidence: float, n
         print(f"Error: No user directories found in {input_dir}")
         return
 
-    jobs: List[Tuple[str, str, str, str, float]] = []
+    jobs: List[Tuple[str, str, str, str, float, bool]] = []
     gesture_classes = set()
 
     for user_dir in user_dirs:
@@ -226,6 +335,7 @@ def process_dataset_mp(input_dir: str, output_dir: str, min_confidence: float, n
                         gesture_class,
                         str(output_root),
                         float(min_confidence),
+                        bool(suppress_stderr),
                     )
                 )
 
@@ -284,6 +394,11 @@ def parse_args():
         default=4,
         help="Number of parallel worker processes (default: 4)",
     )
+    parser.add_argument(
+        "--suppress_stderr",
+        action="store_true",
+        help="HARD-quiet mode: redirect stderr in workers to silence MediaPipe/TFLite C++ warnings (may hide real errors).",
+    )
     return parser.parse_args()
 
 
@@ -298,6 +413,7 @@ def main():
     print(f"Output directory: {args.output_dir}")
     print(f"Min confidence:   {args.min_confidence}")
     print(f"Num workers:      {args.num_workers}")
+    print(f"Suppress stderr:  {bool(args.suppress_stderr)}")
     print("=" * 80)
 
     process_dataset_mp(
@@ -305,6 +421,7 @@ def main():
         output_dir=args.output_dir,
         min_confidence=args.min_confidence,
         num_workers=args.num_workers,
+        suppress_stderr=bool(args.suppress_stderr),
     )
 
 
