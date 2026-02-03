@@ -276,14 +276,31 @@ def _worker_process_video(args: Tuple[str, str, str, str, float]) -> Tuple[str, 
     output_path = output_root / "all" / gesture_class
     output_path.mkdir(parents=True, exist_ok=True)
 
+    video_file = Path(video_path)
+    output_filename = f"{user_id}_{gesture_class}_{video_file.stem}.pkl"
+    output_file = output_path / output_filename
+
+    # Skip if output file already exists (for resuming after crashes)
+    if output_file.exists():
+        # Read existing pkl to get frame count
+        try:
+            with open(output_file, 'rb') as f:
+                import pickle
+                data = pickle.load(f)
+                if isinstance(data, dict):
+                    keypoints = data.get('keypoints', data.get('data', None))
+                else:
+                    keypoints = data
+                num_frames = keypoints.shape[0] if keypoints is not None else 0
+            return user_id, gesture_class, video_file.name, num_frames
+        except Exception:
+            # If we can't read the file, re-process it
+            pass
+
     # If requested, redirect stderr FD for the entire worker task so we also suppress
     # logs emitted during MediaPipe import/initialization in this worker.
     with _redirect_stderr_fd(bool(suppress_stderr)), _suppress_stderr(bool(suppress_stderr)):
         keypoints = process_video(video_path, min_confidence, suppress_stderr=bool(suppress_stderr))
-
-    video_file = Path(video_path)
-    output_filename = f"{user_id}_{gesture_class}_{video_file.stem}.pkl"
-    output_file = output_path / output_filename
 
     metadata = {
         "source_video": str(video_file),
