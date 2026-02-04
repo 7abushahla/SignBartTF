@@ -102,14 +102,14 @@ def load_config(config_path: str):
 
 
 def discover_users(base_data_path):
-    """Discover user IDs from filenames in base_data_path/all/G??/*.pkl."""
-    all_glob = os.path.join(base_data_path, "all", "G??", "*.pkl")
+    """Discover user IDs from filenames in base_data_path/all/G*/*.pkl."""
+    all_glob = os.path.join(base_data_path, "all", "G*", "*.pkl")
     users = set()
     for p in glob.glob(all_glob):
         bn = os.path.basename(p)
-        m = re.match(r"(user\d+)_G\d{2}_.*\.pkl$", bn)
-        if m:
-            users.add(m.group(1))
+        user = bn.split("_", 1)[0]
+        if re.match(r"^user\d+$", user):
+            users.add(user)
     return sorted(users)
 
 

@@ -232,14 +232,13 @@ def class_name_from_idx(class_idx):
 
 
 def discover_users(base_data_path):
-    """Discover user IDs from filenames in base_data_path/all/G??/*.pkl."""
-    all_glob = os.path.join(base_data_path, "all", "G??", "*.pkl")
+    """Discover user IDs from filenames in base_data_path/all/G*/*.pkl."""
     users = set()
-    for p in Path(base_data_path).glob("all/G??/*.pkl"):
+    for p in Path(base_data_path).glob("all/G*/*.pkl"):
         bn = p.name
-        m = re.match(r"(user\d+)_G\d{2}_.*\.pkl$", bn)
-        if m:
-            users.add(m.group(1))
+        user = bn.split("_", 1)[0]
+        if re.match(r"^user\d+$", user):
+            users.add(user)
     return sorted(users) if users else TEST_USERS
 
 

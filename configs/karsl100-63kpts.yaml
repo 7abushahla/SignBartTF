@@ -1,0 +1,95 @@
+# configs/karsl100-63kpts.yaml
+# Configuration for KArSL-100 - 63 KEYPOINTS
+#
+# KArSL-100 is a subset of the KArSL dataset (signID 0071..0170).
+# We keep the same 63-keypoint layout as other 63-kpt datasets.
+
+activation_dropout: 0.3
+attention_dropout: 0.0
+classifier_dropout: 0.7
+d_model: 144
+decoder_attention_heads: 8
+decoder_ffn_dim: 144
+decoder_layerdrop: 0.4
+decoder_layers: 2
+dropout: 0.3
+encoder_attention_heads: 8
+encoder_ffn_dim: 144
+encoder_layerdrop: 0.4
+encoder_layers: 2
+
+joint_idx:
+  # Pose subset (15 keypoints: 0-14)
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  # Left hand (21 keypoints: 15-35)
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  - 24
+  - 25
+  - 26
+  - 27
+  - 28
+  - 29
+  - 30
+  - 31
+  - 32
+  - 33
+  - 34
+  - 35
+  # Right hand (21 keypoints: 36-56)
+  - 36
+  - 37
+  - 38
+  - 39
+  - 40
+  - 41
+  - 42
+  - 43
+  - 44
+  - 45
+  - 46
+  - 47
+  - 48
+  - 49
+  - 50
+  - 51
+  - 52
+  - 53
+  - 54
+  - 55
+  - 56
+  # Face subset (6 keypoints: 57-62)
+  - 57
+  - 58
+  - 59
+  - 60
+  - 61
+  - 62
+
+max_position_embeddings: 256
+pe: learn  # learned positional embeddings
+
+# KArSL-100 has 100 signs (G0071..G0170), remapped to 0..99 in label2id.json
+num_labels: 100
+

@@ -11,26 +11,29 @@ def parse_gestures(gestures_arg):
     gestures_arg = gestures_arg.strip()
     if "-" in gestures_arg and gestures_arg.startswith("G"):
         start, end = gestures_arg.split("-", 1)
-        start_i = int(start[1:])
-        end_i = int(end[1:])
-        return [f"G{i:02d}" for i in range(start_i, end_i + 1)]
+        start_s = start[1:]
+        end_s = end[1:]
+        start_i = int(start_s)
+        end_i = int(end_s)
+        width = max(len(start_s), len(end_s))
+        return [f"G{i:0{width}d}" for i in range(start_i, end_i + 1)]
     return [g.strip() for g in gestures_arg.split(",") if g.strip()]
 
 
 def discover_users(base_root):
-    """Discover user IDs from filenames in base_root/all/G??/*.pkl."""
-    all_glob = os.path.join(base_root, "all", "G??", "*.pkl")
+    """Discover user IDs from filenames in base_root/all/G*/*.pkl."""
+    all_glob = os.path.join(base_root, "all", "G*", "*.pkl")
     users = set()
     for p in glob.glob(all_glob):
         bn = os.path.basename(p)
-        m = re.match(r"(user\d+)_G\d{2}_.*\.pkl$", bn)
-        if m:
-            users.add(m.group(1))
+        user = bn.split("_", 1)[0]
+        if re.match(r"^user\d+$", user):
+            users.add(user)
     return sorted(users)
 
 
 def discover_gestures(base_root):
-    """Discover gesture IDs from label2id.json or all/G?? directories."""
+    """Discover gesture IDs from label2id.json or all/G* directories."""
     label_path = os.path.join(base_root, "label2id.json")
     if os.path.exists(label_path):
         try:
@@ -44,8 +47,8 @@ def discover_gestures(base_root):
     # Fallback: discover from directories
     all_dir = os.path.join(base_root, "all")
     if os.path.isdir(all_dir):
-        gestures = [d for d in os.listdir(all_dir) if re.match(r"^G\d{2}$", d)]
-        return sorted(gestures, key=lambda x: int(x[1:]))
+        gestures = [d for d in os.listdir(all_dir) if re.match(r"^G\d+$", d)]
+        return sorted(gestures, key=lambda x: int(x[1:]) if x.startswith("G") else x)
     return []
 
 
@@ -62,11 +65,11 @@ def parse_sample_metadata(path):
 
 
 def parse_filename(bn):
-    """Parse user + gesture from filename, supports Arabic ASL and LSA64 formats."""
+    """Parse user + gesture from filename, supports Arabic ASL / LSA64 / KArSL formats."""
     patterns = [
-        r"^(user\d+)_((G\d{2}))_R\d{2}\.pkl$",          # user01_G01_R01.pkl
-        r"^(user\d+)_((G\d{2}))_\d+_\d+_\d+\.pkl$",     # user0001_G01_001_001_001.pkl
-        r"^(user\d+)_((G\d{2}))_.*\.pkl$",              # fallback
+        r"^(user\d+)_((G\d+))_R\d+\.pkl$",              # user01_G01_R01.pkl
+        r"^(user\d+)_((G\d+))_\d+_\d+_\d+\.pkl$",       # user0001_G01_001_001_001.pkl
+        r"^(user\d+)_((G\d+))_.*\.pkl$",                # fallback (e.g., user01_G0001_*.pkl)
     ]
     for pat in patterns:
         m = re.match(pat, bn)
@@ -131,7 +134,7 @@ def main():
                 print(f"Warning: {fname} not found in {base_root}")
 
         # Copy pickle files
-        all_glob = os.path.join(base_root, "all", "G??", "*.pkl")
+        all_glob = os.path.join(base_root, "all", "G*", "*.pkl")
         copied_train = 0
         copied_test = 0
 
