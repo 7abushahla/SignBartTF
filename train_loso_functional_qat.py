@@ -28,7 +28,7 @@ import tensorflow_model_optimization as tfmot
 import yaml
 
 from dataset import SignDataset
-from utils import setup_gpu
+from utils import setup_gpu, resolve_output_base
 from model_functional import build_signbart_functional_with_dict_inputs, ExtractLastValidToken
 from model_functional_tflite import build_signbart_functional_tflite, ExtractLastValidTokenTFLite
 from tensorflow_model_optimization.python.core.quantization.keras.quantize_wrapper import QuantizeWrapper
@@ -58,7 +58,8 @@ def parse_args():
                         help="Path to LOSO dataset (e.g., .../arabic-asl-90kpts_LOSO_user01)")
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Trained Functional model (.h5/.keras)")
-    parser.add_argument("--output_dir", type=str, default="exports/qat_finetune")
+    parser.add_argument("--output_dir", type=str, default="",
+                        help="Output directory for QAT artifacts (default: outputs/<dataset>/<run_type>/exports/qat)")
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Batch size for QAT (default: 4, larger than training for stability)")
     parser.add_argument("--qat_epochs", type=int, default=20,
@@ -80,6 +81,12 @@ def parse_args():
                         help="Patience for ReduceLROnPlateau scheduler (default: 5)")
     parser.add_argument("--early_stop_patience", type=int, default=10,
                         help="Patience for EarlyStopping (default: 10, should be > scheduler_patience)")
+    parser.add_argument("--dataset_name", type=str, default="",
+                        help="Dataset name for output separation (e.g., arabic_asl, lsa64)")
+    parser.add_argument("--run_type", type=str, default="loso",
+                        help="Run type for output separation (default: loso)")
+    parser.add_argument("--output_root", type=str, default="",
+                        help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT)")
     parser.add_argument(
         "--freeze_mode",
         type=str,
@@ -448,6 +455,17 @@ def main():
     setup_gpu()
     config = load_config(args.config_path)
     joint_groups = determine_keypoint_groups(config.get("joint_idx", []))
+
+    if not args.output_dir:
+        output_base = resolve_output_base(
+            dataset_name=args.dataset_name or None,
+            run_type=args.run_type or None,
+            output_root=args.output_root or None,
+        )
+        if output_base:
+            args.output_dir = str(output_base / "exports" / "qat")
+        else:
+            args.output_dir = "exports/qat_finetune"
 
     output_dir = Path(args.output_dir)
     from utils import ensure_dir_safe

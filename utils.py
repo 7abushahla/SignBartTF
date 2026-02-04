@@ -4,11 +4,15 @@ Converted from PyTorch implementation.
 """
 import os
 import logging
+import json
+import glob
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple
+
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from datetime import datetime
-import glob
 
 
 def setup_gpu(logger=None):
@@ -84,6 +88,126 @@ hands_only_groups = [lefthand_idx, righthand_idx]
 pose_hands_groups = [upper_body_idx, lefthand_idx, righthand_idx]
 full_75_groups = [pose_idx, lefthand_idx, righthand_idx]
 full_100_groups = [pose_idx, lefthand_idx, righthand_idx, face_idx]
+
+
+def determine_keypoint_groups(config_joint_idx):
+    """
+    Determine how to group keypoints for normalization.
+    Returns a list of lists, where each inner list is a group to normalize together.
+
+    Supports common layouts including:
+      - 63 keypoints: Pose(15) + LHand(21) + RHand(21) + Face(6)
+      - 65/75 keypoints: Pose/Body + LHand(21) + RHand(21)
+      - 90/100 keypoints: Pose/Body + LHand(21) + RHand(21) + Face(25)
+    """
+    if not config_joint_idx:
+        return []
+
+    sorted_idx = sorted(config_joint_idx)
+    total_kpts = len(sorted_idx)
+
+    if total_kpts in (90, 100):
+        body_count = total_kpts - 67  # 21 + 21 + 25 = 67
+        body_kpts = sorted_idx[:body_count]
+        left_hand_kpts = sorted_idx[body_count:body_count + 21]
+        right_hand_kpts = sorted_idx[body_count + 21:body_count + 42]
+        face_kpts = sorted_idx[-25:]
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        groups.append(face_kpts)
+        return groups
+
+    if total_kpts == 63:
+        body_kpts = sorted_idx[:15]
+        left_hand_kpts = sorted_idx[15:36]
+        right_hand_kpts = sorted_idx[36:57]
+        face_kpts = sorted_idx[57:63]
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        groups.append(face_kpts)
+        return groups
+
+    if total_kpts >= 42:
+        body_count = total_kpts - 42
+        body_kpts = sorted_idx[:body_count] if body_count > 0 else []
+        left_hand_kpts = sorted_idx[body_count:body_count + 21]
+        right_hand_kpts = sorted_idx[body_count + 21:body_count + 42]
+        groups = []
+        if body_kpts:
+            groups.append(body_kpts)
+        groups.append(left_hand_kpts)
+        groups.append(right_hand_kpts)
+        return groups
+
+    return [sorted_idx]
+
+
+def _strip_loso_suffix(path: str) -> str:
+    if "_LOSO_" in path:
+        return path.split("_LOSO_")[0]
+    return path
+
+
+def _parse_lsa64_mapping(mapping_path: str):
+    label2name = {}
+    if not mapping_path or not os.path.exists(mapping_path):
+        return label2name
+    with open(mapping_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("LSA64") or line.startswith("===") or line.startswith("Gesture_ID"):
+                continue
+            if line.startswith("Legend"):
+                break
+            parts = [p.strip() for p in line.split("\t") if p.strip()]
+            if len(parts) >= 2 and parts[0].startswith("G"):
+                label2name[parts[0]] = parts[1]
+    return label2name
+
+
+def load_label_maps(data_root: str):
+    """
+    Load id2label/label2id from data_root if present, and optional label2name.
+    For LSA64, will parse lsa64_gesture_mapping.txt if found.
+    Returns: (id2label_dict, label2id_dict, label2name_dict)
+    """
+    id2label = {}
+    label2id = {}
+    label2name = {}
+
+    if not data_root:
+        return id2label, label2id, label2name
+
+    id2label_path = os.path.join(data_root, "id2label.json")
+    label2id_path = os.path.join(data_root, "label2id.json")
+    label2name_path = os.path.join(data_root, "label2name.json")
+
+    try:
+        if os.path.exists(id2label_path):
+            with open(id2label_path, "r") as f:
+                id2label = json.load(f)
+        if os.path.exists(label2id_path):
+            with open(label2id_path, "r") as f:
+                label2id = json.load(f)
+        if os.path.exists(label2name_path):
+            with open(label2name_path, "r") as f:
+                label2name = json.load(f)
+    except Exception:
+        pass
+
+    if not label2name:
+        base_root = _strip_loso_suffix(data_root)
+        lsa_mapping = os.path.join(base_root, "lsa64_gesture_mapping.txt")
+        if os.path.exists(lsa_mapping):
+            label2name = _parse_lsa64_mapping(lsa_mapping)
+
+    return id2label, label2id, label2name
 
 # Legacy aliases for backward compatibility
 body_idx = upper_body_idx
@@ -380,7 +504,84 @@ def ensure_dir_safe(path):
     p.mkdir(parents=True, exist_ok=True)
 
 
-def resolve_checkpoint_dir(exp_name_or_prefix_user: str):
+def infer_dataset_and_run_type(experiment_name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Infer dataset_name and run_type from a standard experiment name."""
+    if not experiment_name:
+        return None, None
+    if "_LOSO_" in experiment_name:
+        return experiment_name.split("_LOSO_")[0], "loso"
+    if experiment_name.endswith("_full"):
+        return experiment_name[: -len("_full")], "full"
+    return None, None
+
+
+def get_output_root(output_root: Optional[str] = None) -> Path:
+    """Resolve the base output root, honoring SIGNBART_OUTPUT_ROOT if set."""
+    if output_root:
+        return Path(output_root)
+    env_root = os.environ.get("SIGNBART_OUTPUT_ROOT")
+    if env_root:
+        return Path(env_root)
+    return Path("outputs")
+
+
+def resolve_output_base(
+    experiment_name: Optional[str] = None,
+    dataset_name: Optional[str] = None,
+    run_type: Optional[str] = None,
+    output_root: Optional[str] = None,
+) -> Optional[Path]:
+    """Resolve the dataset/run-type output base directory if possible."""
+    if not dataset_name or not run_type:
+        inferred_dataset, inferred_run = infer_dataset_and_run_type(experiment_name)
+        dataset_name = dataset_name or inferred_dataset
+        run_type = run_type or inferred_run
+    if dataset_name and run_type:
+        return get_output_root(output_root) / dataset_name / run_type
+    return None
+
+
+def resolve_output_paths(
+    experiment_name: str,
+    dataset_name: Optional[str] = None,
+    run_type: Optional[str] = None,
+    output_root: Optional[str] = None,
+) -> dict:
+    """Resolve standardized output paths with backward-compatible fallbacks."""
+    output_base = resolve_output_base(
+        experiment_name=experiment_name,
+        dataset_name=dataset_name,
+        run_type=run_type,
+        output_root=output_root,
+    )
+    if output_base:
+        return {
+            "base": output_base,
+            "logs_dir": output_base / "logs" / "run_logs",
+            "checkpoints_dir": output_base / "checkpoints" / experiment_name,
+            "out_imgs_dir": output_base / "out-imgs" / experiment_name,
+            "training_metadata_dir": output_base / "training_metadata",
+            "results_dir": output_base / "results",
+            "exports_dir": output_base / "exports",
+        }
+    # Legacy fallback paths
+    return {
+        "base": None,
+        "logs_dir": Path("logs/run_logs"),
+        "checkpoints_dir": Path(f"checkpoints_{experiment_name}"),
+        "out_imgs_dir": Path("out-imgs") / experiment_name,
+        "training_metadata_dir": Path("training_metadata"),
+        "results_dir": Path("results"),
+        "exports_dir": Path("exports"),
+    }
+
+
+def resolve_checkpoint_dir(
+    exp_name_or_prefix_user: str,
+    dataset_name: Optional[str] = None,
+    run_type: Optional[str] = None,
+    output_root: Optional[str] = None,
+):
     """
     Resolve a checkpoint directory for a given experiment name or prefix+user token.
     Tries the direct `checkpoints_{exp_name_or_prefix_user}` first, then falls
@@ -389,19 +590,39 @@ def resolve_checkpoint_dir(exp_name_or_prefix_user: str):
 
     Returns the directory path string (not guaranteed to exist).
     """
-    from pathlib import Path
-    # Direct candidate
-    candidate = f"checkpoints_{exp_name_or_prefix_user}"
+    # Preferred candidate (dataset-aware)
+    paths = resolve_output_paths(
+        exp_name_or_prefix_user,
+        dataset_name=dataset_name,
+        run_type=run_type,
+        output_root=output_root,
+    )
+    candidate = paths["checkpoints_dir"]
     if Path(candidate).exists():
-        return candidate
+        return str(candidate)
+
+    # Legacy direct candidate
+    legacy_candidate = f"checkpoints_{exp_name_or_prefix_user}"
+    if Path(legacy_candidate).exists():
+        return legacy_candidate
 
     # Try to extract trailing user token (e.g., user01) and find any checkpoints_* that ends with it
     parts = exp_name_or_prefix_user.split("_")
     if parts:
         user_token = parts[-1]
-        matches = glob.glob(f"checkpoints_*{user_token}")
+        matches = []
+        output_base = resolve_output_base(
+            experiment_name=exp_name_or_prefix_user,
+            dataset_name=dataset_name,
+            run_type=run_type,
+            output_root=output_root,
+        )
+        if output_base:
+            matches = glob.glob(str(output_base / "checkpoints" / f"*{user_token}"))
+        if not matches:
+            matches = glob.glob(f"checkpoints_*{user_token}")
         if matches:
             return matches[0]
 
     # As a last resort, return the original candidate (caller will handle missing files)
-    return candidate
+    return str(candidate)

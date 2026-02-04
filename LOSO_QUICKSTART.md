@@ -6,6 +6,8 @@
 
 For Arabic ASL, we test on 4 representative users: **user01, user02, user08, user11**
 
+**Output layout update**: results now live under `outputs/<dataset>/<run_type>/...` by default (e.g., `outputs/arabic_asl/loso/checkpoints/arabic_asl_LOSO_user01`). Legacy paths like `checkpoints_*`, `exports/`, `results/`, and `logs/` may still exist for older runs.
+
 ## 🚀 Two-Step Process
 
 ### Step 1: Test Single LOSO First (30 min - 2 hours)

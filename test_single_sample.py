@@ -26,14 +26,77 @@ import os
 from collections import defaultdict
 import yaml
 
-# Class mapping (0-9 for G01-G10)
+from utils import determine_keypoint_groups, load_label_maps
+
+# Class mapping (default fallback: G01-G10)
 CLASS_NAMES = [
     'G01', 'G02', 'G03', 'G04', 'G05',
     'G06', 'G07', 'G08', 'G09', 'G10'
 ]
+CLASS_NAME_MAP = {c: c for c in CLASS_NAMES}
+CLASS_DISPLAY_NAMES = [c for c in CLASS_NAMES]
+CLASS_HAS_NAMES = False
+EXPECTED_NUM_KEYPOINTS = None
 
 
-def load_pickle_file(pickle_path, verbose=True):
+def set_class_names(class_names, label2name=None):
+    """Set global class names and display mapping."""
+    global CLASS_NAMES, CLASS_NAME_MAP, CLASS_DISPLAY_NAMES, CLASS_HAS_NAMES
+    CLASS_NAMES = class_names
+    if label2name:
+        CLASS_NAME_MAP = {
+            c: f"{c} ({label2name[c]})" if label2name.get(c) else c
+            for c in class_names
+        }
+        CLASS_HAS_NAMES = True
+    else:
+        CLASS_NAME_MAP = {c: c for c in class_names}
+        CLASS_HAS_NAMES = False
+    CLASS_DISPLAY_NAMES = [CLASS_NAME_MAP[c] for c in class_names]
+
+
+def set_expected_num_keypoints(num_kpts):
+    """Set global expected keypoint count for pickle validation."""
+    global EXPECTED_NUM_KEYPOINTS
+    EXPECTED_NUM_KEYPOINTS = num_kpts
+
+
+def get_group_slices(num_keypoints):
+    """Return (name, start, end) slices for common keypoint layouts."""
+    if num_keypoints == 63:
+        return [
+            ("Pose", 0, 14),
+            ("L-Hand", 15, 35),
+            ("R-Hand", 36, 56),
+            ("Face", 57, 62),
+        ]
+    if num_keypoints == 65:
+        return [
+            ("Pose", 0, 22),
+            ("L-Hand", 23, 43),
+            ("R-Hand", 44, 64),
+        ]
+    if num_keypoints >= 90:
+        return [
+            ("Pose", 0, 22),
+            ("L-Hand", 23, 43),
+            ("R-Hand", 44, 64),
+            ("Face", 65, 89),
+        ]
+    if num_keypoints >= 42:
+        body_count = num_keypoints - 42
+        groups = []
+        if body_count > 0:
+            groups.append(("Pose", 0, body_count - 1))
+        groups.append(("L-Hand", body_count, body_count + 20))
+        groups.append(("R-Hand", body_count + 21, body_count + 41))
+        return groups
+    if num_keypoints > 0:
+        return [("Keypoints", 0, num_keypoints - 1)]
+    return []
+
+
+def load_pickle_file(pickle_path, verbose=True, expected_num_kpts=None):
     """
     Load keypoints from pickle file.
     
@@ -42,7 +105,7 @@ def load_pickle_file(pickle_path, verbose=True):
         verbose: if True, print detailed info
     
     Returns:
-        keypoints: numpy array [num_frames, 90, 2]
+        keypoints: numpy array [num_frames, K, 2]
     """
     if verbose:
         print(f"Loading pickle file: {pickle_path}")
@@ -50,7 +113,7 @@ def load_pickle_file(pickle_path, verbose=True):
     with open(pickle_path, 'rb') as f:
         data = pickle.load(f)
     
-    # Extract keypoints (should be [T, 90, 2])
+    # Extract keypoints (should be [T, K, 2])
     if isinstance(data, dict):
         if 'keypoints' in data:
             keypoints = data['keypoints']
@@ -78,7 +141,7 @@ def load_pickle_file(pickle_path, verbose=True):
     
     # Validate shape
     if keypoints.ndim != 3:
-        raise ValueError(f"Expected 3D array [T, 90, 2/3], got shape {keypoints.shape}")
+        raise ValueError(f"Expected 3D array [T, K, 2/3], got shape {keypoints.shape}")
     
     num_frames, num_kpts, num_coords = keypoints.shape
     if verbose:
@@ -86,8 +149,11 @@ def load_pickle_file(pickle_path, verbose=True):
         print(f"  Keypoints per frame: {num_kpts}")
         print(f"  Coordinates: {num_coords}")
     
-    if num_kpts != 90:
-        raise ValueError(f"Expected 90 keypoints, got {num_kpts}")
+    if expected_num_kpts is None:
+        expected_num_kpts = EXPECTED_NUM_KEYPOINTS
+
+    if expected_num_kpts is not None and num_kpts != expected_num_kpts:
+        raise ValueError(f"Expected {expected_num_kpts} keypoints, got {num_kpts}")
     
     # Handle 3D coordinates (x, y, z/visibility) - extract only x, y
     if num_coords == 3:
@@ -106,19 +172,17 @@ def dump_keypoint_frames(keypoints, dump_path):
     """
     Dump per-frame keypoints (split by groups) to JSON for inspection.
     """
+    groups = get_group_slices(keypoints.shape[1])
     dump_data = {
         'shape': keypoints.shape,
         'num_frames': int(keypoints.shape[0]),
         'frames': []
     }
     for idx, frame in enumerate(keypoints):
-        dump_data['frames'].append({
-            'frame_index': idx,
-            'pose': frame[0:23].tolist(),
-            'left_hand': frame[23:44].tolist(),
-            'right_hand': frame[44:65].tolist(),
-            'face': frame[65:90].tolist(),
-        })
+        entry = {'frame_index': idx}
+        for name, start, end in groups:
+            entry[name] = frame[start:end+1].tolist()
+        dump_data['frames'].append(entry)
     with open(dump_path, 'w') as f:
         json.dump(dump_data, f, indent=2)
     print(f"📝 Dumped raw keypoints for {keypoints.shape[0]} frames to {dump_path}")
@@ -129,7 +193,7 @@ def log_raw_keypoints_sample(keypoints, frame_idx=0):
     Log raw keypoints before any preprocessing (to match phone app's RAW output).
     
     Args:
-        keypoints: numpy array [T, 90, 2]
+        keypoints: numpy array [T, K, 2]
         frame_idx: which frame to show (default: 0)
     """
     if keypoints.shape[0] <= frame_idx:
@@ -139,10 +203,10 @@ def log_raw_keypoints_sample(keypoints, frame_idx=0):
     frame = keypoints[frame_idx]
     
     print(f"\n🔍 RAW (pre-clip) - frame {frame_idx} sample:")
-    print(f"   Pose (first 5): {frame[0:5].tolist()}")
-    print(f"   Left hand (first 5): {frame[23:28].tolist()}")
-    print(f"   Right hand (first 5): {frame[44:49].tolist()}")
-    print(f"   Face (first 5): {frame[65:70].tolist()}")
+    groups = get_group_slices(frame.shape[0])
+    for name, start, end in groups:
+        end_preview = min(start + 5, end + 1)
+        print(f"   {name} (first 5): {frame[start:end_preview].tolist()}")
 
 
 def log_bounding_box_stats(keypoints, frame_idx=0):
@@ -150,7 +214,7 @@ def log_bounding_box_stats(keypoints, frame_idx=0):
     Log bounding box statistics for each keypoint group (to match phone app's output).
     
     Args:
-        keypoints: numpy array [T, 90, 2]
+        keypoints: numpy array [T, K, 2]
         frame_idx: which frame to analyze (default: 0)
     """
     if keypoints.shape[0] <= frame_idx:
@@ -161,12 +225,7 @@ def log_bounding_box_stats(keypoints, frame_idx=0):
     
     print(f"\n📐 Bounding Box Stats (frame {frame_idx}, for comparison with phone):")
     
-    groups = [
-        ('Pose', 0, 22),
-        ('L-Hand', 23, 43),
-        ('R-Hand', 44, 64),
-        ('Face', 65, 89),
-    ]
+    groups = get_group_slices(frame.shape[0])
     
     for name, start, end in groups:
         group_kpts = frame[start:end+1]
@@ -196,7 +255,7 @@ def log_frame_summary(keypoints, label, max_frames=3, sample_interval_ms=150):
     Print summary of frames sampled at specified intervals (to match phone sampling).
     
     Args:
-        keypoints: numpy array [T, 90, 2]
+        keypoints: numpy array [T, K, 2]
         label: string label for the summary
         max_frames: max number of frames to show details for
         sample_interval_ms: sampling interval in milliseconds (default 150ms to match phone)
@@ -214,30 +273,25 @@ def log_frame_summary(keypoints, label, max_frames=3, sample_interval_ms=150):
     print(f"   Sampling every {frames_per_sample} frames: {len(sampled_indices)} samples")
     print(f"   Frame indices: {sampled_indices[:10]}{'...' if len(sampled_indices) > 10 else ''}")
     
-    group_defs = {
-        'pose': (0, 23),
-        'left_hand': (23, 44),
-        'right_hand': (44, 65),
-        'face': (65, 90),
-    }
+    group_defs = get_group_slices(keypoints.shape[1])
     
     for list_idx, frame_idx in enumerate(sampled_indices[:21]):  # Match phone's typical 21 frames
         frame = keypoints[frame_idx]
         counts = {}
-        for name, (start, end) in group_defs.items():
-            segment = frame[start:end]
+        sizes = {}
+        for name, start, end in group_defs:
+            segment = frame[start:end + 1]
             counts[name] = int(np.count_nonzero(np.any(segment != 0.0, axis=1)))
+            sizes[name] = end - start + 1
         
         time_ms = frame_idx * (1000 / fps)
-        print(f"   Frame {frame_idx} (~{int(time_ms)}ms): pose {counts['pose']}/23, "
-              f"L-hand {counts['left_hand']}/21, "
-              f"R-hand {counts['right_hand']}/21, "
-              f"face {counts['face']}/25")
+        counts_str = ", ".join([f"{name} {counts[name]}/{sizes[name]}" for name, _, _ in group_defs])
+        print(f"   Frame {frame_idx} (~{int(time_ms)}ms): {counts_str}")
         
         # Show details for first few frames
         if list_idx < max_frames:
-            for name, (start, end) in group_defs.items():
-                segment = np.round(frame[start:end][:5], 3).tolist()
+            for name, start, end in group_defs:
+                segment = np.round(frame[start:end + 1][:5], 3).tolist()
                 print(f"     {name} first 5: {segment}")
 
 
@@ -340,12 +394,12 @@ def preprocess_for_tflite_training_style(keypoints, joint_idxs, max_len=64):
     Preprocess keypoints using THE SAME method as training (dataset.py).
     
     Args:
-        keypoints: numpy array [T, 90, 2]
+        keypoints: numpy array [T, K, 2]
         joint_idxs: list of lists of keypoint indices for each group
         max_len: max sequence length (default 64)
     
     Returns:
-        keypoints_padded: [1, 64, 90, 2]
+        keypoints_padded: [1, 64, K, 2]
         attention_mask: [1, 64]
     """
     num_frames = keypoints.shape[0]
@@ -380,7 +434,7 @@ def preprocess_for_tflite_training_style(keypoints, joint_idxs, max_len=64):
         mask = np.ones(max_len, dtype=np.float32)
     
     # Step 5: Add batch dimension
-    keypoints = keypoints[np.newaxis, ...]  # [1, 64, 90, 2]
+    keypoints = keypoints[np.newaxis, ...]  # [1, 64, K, 2]
     mask = mask[np.newaxis, ...]            # [1, 64]
     
     return keypoints.astype(np.float32), mask.astype(np.float32)
@@ -391,7 +445,7 @@ def postprocess_tflite_output(logits, return_top_k=5):
     Process TFLite model output to get predictions.
     
     Args:
-        logits: numpy array [1, 10] or [10] - raw model output
+        logits: numpy array [1, C] or [C] - raw model output
         return_top_k: return top K predictions (default: 5)
     
     Returns:
@@ -461,7 +515,8 @@ def load_test_set(test_dir):
     for class_name in CLASS_NAMES:
         count = class_counts[class_name]
         if count > 0:
-            print(f"    {class_name}: {count} samples")
+            display = CLASS_NAME_MAP.get(class_name, class_name)
+            print(f"    {display}: {count} samples")
     
     return samples
 
@@ -476,51 +531,15 @@ def load_config(config_path):
 def create_joint_idx_groups(joint_idx_flat):
     """
     Create groups from flat joint_idx list.
-    Groups: Pose (0-22), Left Hand (23-43), Right Hand (44-64), Face (65-89)
+    Groups follow training preprocessing (pose/left/right/face subsets).
     
     Args:
-        joint_idx_flat: flat list of 90 keypoint indices
+        joint_idx_flat: flat list of keypoint indices
     
     Returns:
         list of lists (groups)
     """
-    if not joint_idx_flat:
-        return []
-    
-    sorted_idx = sorted(joint_idx_flat)
-    total_kpts = len(sorted_idx)
-    
-    # Known structure for 90 keypoints:
-    # - Pose: 0-22 (23 points)
-    # - Left Hand: 23-43 (21 points)
-    # - Right Hand: 44-64 (21 points)
-    # - Face: 65-89 (25 points)
-    
-    if total_kpts >= 67:  # At least some pose + 2 hands + face
-        # Last 25: face
-        face_kpts = sorted_idx[-25:]
-        # Previous 21: right hand  
-        right_hand_kpts = sorted_idx[-46:-25]
-        # Previous 21: left hand
-        left_hand_kpts = sorted_idx[-67:-46]
-        # Everything else: pose/body
-        body_kpts = sorted_idx[:-67]
-        
-        # Create groups (non-empty only)
-        groups = []
-        if body_kpts:
-            groups.append(body_kpts)
-        if left_hand_kpts:
-            groups.append(left_hand_kpts)
-        if right_hand_kpts:
-            groups.append(right_hand_kpts)
-        if face_kpts:
-            groups.append(face_kpts)
-        
-        return groups
-    else:
-        # Fallback: just use all as one group
-        return [sorted_idx]
+    return determine_keypoint_groups(joint_idx_flat)
 
 
 def evaluate_test_set(tflite_path, test_dir, joint_idxs):
@@ -630,7 +649,8 @@ def evaluate_test_set(tflite_path, test_dir, joint_idxs):
         if class_name in per_class_acc:
             acc = per_class_acc[class_name]
             count = per_class_counts[class_name]
-            print(f"  {class_name}: {acc:.4f} ({acc*100:.2f}%) - {count} samples")
+            display = CLASS_NAME_MAP.get(class_name, class_name)
+            print(f"  {display}: {acc:.4f} ({acc*100:.2f}%) - {count} samples")
     
     print(f"\nConfusion Matrix:")
     print(f"{'':6s} " + " ".join([f"{c:>5s}" for c in CLASS_NAMES]))
@@ -655,7 +675,7 @@ def run_tflite_inference(tflite_path, keypoints, joint_idxs):
     
     Args:
         tflite_path: path to TFLite model
-        keypoints: numpy array [T, 90, 2]
+        keypoints: numpy array [T, K, 2]
         joint_idxs: list of lists of keypoint indices for each group
     
     Returns:
@@ -689,16 +709,10 @@ def run_tflite_inference(tflite_path, keypoints, joint_idxs):
     
     # Show sample of preprocessed data
     print(f"\n  Sample preprocessed keypoints (frame 0):")
-    # Show first 5 points from each group
-    pose_pts = kpts_input[0, 0, :5, :]
-    lhand_pts = kpts_input[0, 0, 23:28, :]
-    rhand_pts = kpts_input[0, 0, 44:49, :]
-    face_pts = kpts_input[0, 0, 65:70, :]
-    
-    print(f"    Pose (first 5): {[[f'{x:.3f}', f'{y:.3f}'] for x, y in pose_pts]}")
-    print(f"    L-hand (first 5): {[[f'{x:.3f}', f'{y:.3f}'] for x, y in lhand_pts]}")
-    print(f"    R-hand (first 5): {[[f'{x:.3f}', f'{y:.3f}'] for x, y in rhand_pts]}")
-    print(f"    Face (first 5): {[[f'{x:.3f}', f'{y:.3f}'] for x, y in face_pts]}")
+    groups = get_group_slices(kpts_input.shape[2])
+    for name, start, end in groups:
+        pts = kpts_input[0, 0, start:min(start + 5, end + 1), :]
+        print(f"    {name} (first 5): {[[f'{x:.3f}', f'{y:.3f}'] for x, y in pts]}")
     
     # Find keypoints and mask inputs by shape
     keypoints_idx = None
@@ -706,7 +720,7 @@ def run_tflite_inference(tflite_path, keypoints, joint_idxs):
     
     for i, detail in enumerate(input_details):
         shape = detail['shape']
-        if len(shape) == 4:  # keypoints: [1, 64, 90, 2]
+        if len(shape) == 4:  # keypoints: [1, 64, K, 2]
             keypoints_idx = i
         elif len(shape) == 2:  # attention_mask: [1, 64]
             mask_idx = i
@@ -783,6 +797,28 @@ def main():
     print(f"  Grouped into: {len(joint_idxs)} groups")
     for i, group in enumerate(joint_idxs):
         print(f"    Group {i}: {len(group)} keypoints")
+    set_expected_num_keypoints(len(joint_idx_flat))
+
+    # Load label mappings from dataset root (parent of test_dir)
+    dataset_root = os.path.abspath(os.path.join(args.test_dir, os.pardir))
+    id2label, label2id, label2name = load_label_maps(dataset_root)
+    if id2label:
+        try:
+            class_names = [id2label[str(i)] for i in sorted(map(int, id2label.keys()))]
+            set_class_names(class_names, label2name)
+            if label2name:
+                example_key = sorted(label2name.keys())[0]
+                print(f"  Labels: {len(class_names)} classes (e.g., {example_key} -> {label2name[example_key]})")
+            else:
+                print(f"  Labels: {len(class_names)} classes")
+        except Exception:
+            pass
+
+    # Allow sample_label to be provided as sign name
+    if args.sample_label and label2name:
+        name_to_code = {v: k for k, v in label2name.items()}
+        if args.sample_label not in CLASS_NAMES and args.sample_label in name_to_code:
+            args.sample_label = name_to_code[args.sample_label]
     
     # 1. Evaluate on full test set (unless skipped)
     if not args.skip_test_set:
@@ -845,7 +881,8 @@ def main():
         print("="*80)
         
         predicted_class = result['predicted_class']
-        predicted_label = CLASS_NAMES[predicted_class] if predicted_class < len(CLASS_NAMES) else f"Class_{predicted_class}"
+        predicted_code = CLASS_NAMES[predicted_class] if predicted_class < len(CLASS_NAMES) else f"Class_{predicted_class}"
+        predicted_label = CLASS_NAME_MAP.get(predicted_code, predicted_code)
         
         print(f"Predicted class: {predicted_class} ({predicted_label})")
         print(f"Confidence: {result['confidence']:.4f} ({result['confidence']*100:.2f}%)")
@@ -864,18 +901,20 @@ def main():
         
         print(f"\nTop 5 predictions:")
         for i, (cls, conf) in enumerate(zip(result['top_k_classes'], result['top_k_confidences']), 1):
-            label = CLASS_NAMES[cls] if cls < len(CLASS_NAMES) else f"Class_{cls}"
+            code = CLASS_NAMES[cls] if cls < len(CLASS_NAMES) else f"Class_{cls}"
+            label = CLASS_NAME_MAP.get(code, code)
             marker = "← PREDICTED" if i == 1 else ""
-            if args.sample_label and label == args.sample_label:
+            if args.sample_label and code == args.sample_label:
                 marker = "← GROUND TRUTH"
             print(f"  {i}. {label:4s} (class {cls}): {conf:.4f} ({conf*100:.2f}%) {marker}")
         
         print("\nAll class probabilities:")
-        for i, (label, prob) in enumerate(zip(CLASS_NAMES, result['all_probabilities'])):
+        for i, (code, prob) in enumerate(zip(CLASS_NAMES, result['all_probabilities'])):
+            label = CLASS_NAME_MAP.get(code, code)
             marker = ""
             if i == predicted_class:
                 marker = "← PREDICTED"
-            if args.sample_label and label == args.sample_label:
+            if args.sample_label and code == args.sample_label:
                 marker += " ← GROUND TRUTH"
             print(f"  {label:4s} (class {i}): {prob:.4f} ({prob*100:.2f}%) {marker}")
         

@@ -3,6 +3,8 @@ import shutil
 import glob
 import re
 import argparse
+import json
+import pickle
 
 
 def parse_gestures(gestures_arg):
@@ -21,10 +23,58 @@ def discover_users(base_root):
     users = set()
     for p in glob.glob(all_glob):
         bn = os.path.basename(p)
-        m = re.match(r"(user\d{2})_G\d{2}_R\d{2}\.pkl$", bn)
+        m = re.match(r"(user\d+)_G\d{2}_.*\.pkl$", bn)
         if m:
             users.add(m.group(1))
     return sorted(users)
+
+
+def discover_gestures(base_root):
+    """Discover gesture IDs from label2id.json or all/G?? directories."""
+    label_path = os.path.join(base_root, "label2id.json")
+    if os.path.exists(label_path):
+        try:
+            with open(label_path, "r") as f:
+                label2id = json.load(f)
+            gestures = sorted(label2id.keys(), key=lambda x: int(x[1:]) if x.startswith("G") else x)
+            if gestures:
+                return gestures
+        except Exception:
+            pass
+    # Fallback: discover from directories
+    all_dir = os.path.join(base_root, "all")
+    if os.path.isdir(all_dir):
+        gestures = [d for d in os.listdir(all_dir) if re.match(r"^G\d{2}$", d)]
+        return sorted(gestures, key=lambda x: int(x[1:]))
+    return []
+
+
+def parse_sample_metadata(path):
+    """Fallback: read user/class from pickle if filename parsing fails."""
+    try:
+        with open(path, "rb") as f:
+            sample = pickle.load(f)
+        user = sample.get("user")
+        gesture = sample.get("class")
+        return user, gesture
+    except Exception:
+        return None, None
+
+
+def parse_filename(bn):
+    """Parse user + gesture from filename, supports Arabic ASL and LSA64 formats."""
+    patterns = [
+        r"^(user\d+)_((G\d{2}))_R\d{2}\.pkl$",          # user01_G01_R01.pkl
+        r"^(user\d+)_((G\d{2}))_\d+_\d+_\d+\.pkl$",     # user0001_G01_001_001_001.pkl
+        r"^(user\d+)_((G\d{2}))_.*\.pkl$",              # fallback
+    ]
+    for pat in patterns:
+        m = re.match(pat, bn)
+        if m:
+            user = m.group(1)
+            gesture = m.group(2)
+            return user, gesture
+    return None, None
 
 
 def main():
@@ -44,8 +94,8 @@ def main():
     parser.add_argument(
         "--gestures",
         type=str,
-        default="G01-G10",
-        help="Gesture list (e.g., 'G01-G10' or 'G01,G02,G03')"
+        default="auto",
+        help="Gesture list (e.g., 'G01-G10' or 'G01,G02,G03' or 'auto')"
     )
     args = parser.parse_args()
 
@@ -54,7 +104,12 @@ def main():
         holdouts = discover_users(base_root)
     else:
         holdouts = [u.strip() for u in args.holdouts.split(",") if u.strip()]
-    gestures = parse_gestures(args.gestures)
+    if args.gestures.strip().lower() == "auto":
+        gestures = discover_gestures(base_root)
+    else:
+        gestures = parse_gestures(args.gestures)
+    if not gestures:
+        raise RuntimeError(f"Could not discover gestures for base_root: {base_root}")
 
     # Recreate LOSO directories with label files
     for hu in holdouts:
@@ -82,10 +137,14 @@ def main():
 
         for p in glob.glob(all_glob):
             bn = os.path.basename(p)
-            m = re.match(r"(user\d{2})_(G\d{2})_(R\d{2})\.pkl$", bn)
-            if not m:
+            user, gesture = parse_filename(bn)
+            if not user or not gesture:
+                # Fallback to metadata inside pickle
+                user, gesture = parse_sample_metadata(p)
+            if not user or not gesture:
                 continue
-            user, gesture, repeat = m.group(1), m.group(2), m.group(3)
+            if gesture not in gestures:
+                continue
 
             dst_split = "test" if user == hu else "train"
             dst = os.path.join(loso_root, dst_split, gesture, bn)

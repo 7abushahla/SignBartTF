@@ -3,11 +3,18 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+DATASET_NAME="${DATASET_NAME:-arabic_asl}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-"$ROOT_DIR/outputs"}"
+
 # Paths (shared dataset)
 RAW_DIR="${RAW_DIR:-"$ROOT_DIR/MLR511-ArabicSignLanguage-Dataset-MP4"}"
 FLIPPED_DIR="${FLIPPED_DIR:-"$ROOT_DIR/MLR511-ArabicSignLanguage-Dataset-MP4_FLIPPED"}"
 DATA_DIR_65="${DATA_DIR_65:-"$ROOT_DIR/data/arabic-asl-65kpts"}"
 DATA_DIR_90="${DATA_DIR_90:-"$ROOT_DIR/data/arabic-asl-90kpts"}"
+
+# Data prep toggles (useful for keypoints-only datasets)
+SKIP_FLIP="${SKIP_FLIP:-0}"
+SKIP_EXTRACT="${SKIP_EXTRACT:-0}"
 
 # Training settings
 HOLDOUT_ONLY="${HOLDOUT_ONLY:-""}"
@@ -60,28 +67,46 @@ ensure_conda_env() {
     return 0
   fi
 
+  # Prefer sourcing conda.sh from common locations to avoid `conda info` issues in
+  # some environments (plugins / sandbox restrictions).
+  local -a conda_sh_candidates=()
+  if [[ -n "${CONDA_SH:-}" ]]; then
+    conda_sh_candidates+=("${CONDA_SH}")
+  fi
+  conda_sh_candidates+=(
+    "$HOME/anaconda3/etc/profile.d/conda.sh"
+    "$HOME/miniconda3/etc/profile.d/conda.sh"
+    "$HOME/mambaforge/etc/profile.d/conda.sh"
+    "/opt/conda/etc/profile.d/conda.sh"
+  )
+
+  for conda_sh in "${conda_sh_candidates[@]}"; do
+    if [[ -f "$conda_sh" ]]; then
+      # shellcheck disable=SC1090
+      source "$conda_sh"
+      if conda activate "$env_name" >/dev/null 2>&1; then
+        log "Activated conda env: $env_name"
+        return 0
+      fi
+    fi
+  done
+
+  # Fallback: try to locate conda.sh via `conda info --base`
   if command -v conda >/dev/null 2>&1; then
     local conda_base
     conda_base=$(conda info --base 2>/dev/null || true)
     if [[ -n "$conda_base" && -f "$conda_base/etc/profile.d/conda.sh" ]]; then
       # shellcheck disable=SC1090
       source "$conda_base/etc/profile.d/conda.sh"
-      conda activate "$env_name"
-      log "Activated conda env: $env_name"
-      return 0
-    elif [[ -f "$(which conda)" ]]; then
-      # As a fallback, try `conda activate` directly (may fail in some shells)
       if conda activate "$env_name" >/dev/null 2>&1; then
         log "Activated conda env: $env_name"
         return 0
       fi
     fi
-    echo "Failed to activate conda env '$env_name'. Please activate it manually and retry." >&2
-    exit 1
-  else
-    echo "Conda not found. Please activate environment '$env_name' before running this script." >&2
-    exit 1
   fi
+
+  echo "Failed to activate conda env '$env_name'. Please activate it manually and retry." >&2
+  exit 1
 }
 
 should_flip_user() {
@@ -259,7 +284,20 @@ run_variant() {
   log "  Exp prefix: $exp_prefix"
   log "  Data dir: $data_dir"
 
-  extract_keypoints_if_needed "$data_dir" "$extract_script"
+  if [[ "$SKIP_EXTRACT" == "1" ]]; then
+    if [[ -d "$data_dir/all" ]] && find "$data_dir/all" -type f -name "*.pkl" -print -quit | grep -q .; then
+      log "Keypoint extraction: skipped (SKIP_EXTRACT=$SKIP_EXTRACT)."
+    else
+      echo "SKIP_EXTRACT=1 but no keypoints found in $data_dir/all. Aborting." >&2
+      exit 1
+    fi
+  else
+    if [[ "$SKIP_FLIP" == "1" && ! -d "$FLIPPED_DIR" ]]; then
+      echo "SKIP_FLIP=1 but FLIPPED_DIR does not exist: $FLIPPED_DIR" >&2
+      exit 1
+    fi
+    extract_keypoints_if_needed "$data_dir" "$extract_script"
+  fi
   if [[ "$RUN_LOSO" == "1" ]]; then
     create_loso_if_needed "$data_dir"
 
@@ -275,6 +313,8 @@ run_variant() {
         --seed "$seed"
         --exp_prefix "$seed_prefix"
         --holdouts "$HOLDOUTS"
+        --dataset_name "$DATASET_NAME"
+        --output_root "$OUTPUT_ROOT"
       )
 
       if [[ -n "$HOLDOUT_ONLY" ]]; then
@@ -293,7 +333,9 @@ run_variant() {
           --base_data_path "$data_dir" \
           --exp_prefix "$seed_prefix" \
           --holdouts "$HOLDOUTS" \
-          --output_base_dir "exports/ptq_loso_${seed_prefix}"
+          --dataset_name "$DATASET_NAME" \
+          --output_root "$OUTPUT_ROOT" \
+          --output_base_dir "$OUTPUT_ROOT/$DATASET_NAME/loso/exports/ptq_${seed_prefix}"
       else
         log "PTQ export: disabled (RUN_PTQ=$RUN_PTQ)."
       fi
@@ -304,7 +346,9 @@ run_variant() {
           --base_data_path "$data_dir" \
           --exp_prefix "$seed_prefix" \
           --holdouts "$HOLDOUTS" \
-          --output_base_dir "exports/qat_loso_${seed_prefix}" \
+          --dataset_name "$DATASET_NAME" \
+          --output_root "$OUTPUT_ROOT" \
+          --output_base_dir "$OUTPUT_ROOT/$DATASET_NAME/loso/exports/qat_${seed_prefix}" \
           --qat_epochs "$QAT_EPOCHS" \
           --batch_size "$QAT_BATCH" \
           --lr "$QAT_LR" \
@@ -324,7 +368,9 @@ run_variant() {
       --epochs "$FULL_EPOCHS" \
       --lr "$FULL_LR" \
       --seed "$FULL_SEED" \
-      --exp_name "${exp_prefix}_full"
+      --exp_name "${exp_prefix}_full" \
+      --dataset_name "$DATASET_NAME" \
+      --output_root "$OUTPUT_ROOT"
   else
     log "Full dataset training: disabled (RUN_FULL_DATASET=$RUN_FULL_DATASET)."
   fi
@@ -336,8 +382,11 @@ run_variant() {
       --base_data_path "$data_dir" \
       --seed_list "$SEED_LIST" \
       --exp_prefix_base "$exp_prefix" \
-      --ptq_base_dir "exports/ptq_loso_${exp_prefix}_seed{seed}" \
-      --qat_base_dir "exports/qat_loso_${exp_prefix}_seed{seed}"
+      --dataset_name "$DATASET_NAME" \
+      --run_type "loso" \
+      --output_root "$OUTPUT_ROOT" \
+      --ptq_base_dir "$OUTPUT_ROOT/$DATASET_NAME/loso/exports/ptq_${exp_prefix}_seed{seed}" \
+      --qat_base_dir "$OUTPUT_ROOT/$DATASET_NAME/loso/exports/qat_${exp_prefix}_seed{seed}"
   else
     log "Collect results: disabled (RUN_COLLECT=$RUN_COLLECT)."
   fi
@@ -345,7 +394,11 @@ run_variant() {
 
 main() {
   ensure_conda_env
-  flip_videos_if_needed
+  if [[ "$SKIP_FLIP" == "1" ]]; then
+    log "Flip step: skipped (SKIP_FLIP=$SKIP_FLIP)."
+  else
+    flip_videos_if_needed
+  fi
   for variant in $VARIANTS; do
     run_variant "$variant"
   done

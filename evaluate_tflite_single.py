@@ -33,6 +33,7 @@ import tensorflow as tf
 import yaml
 
 from dataset import SignDataset
+from utils import determine_keypoint_groups, load_label_maps
 
 
 def parse_args():
@@ -82,38 +83,6 @@ def set_seed(seed: int):
     np.random.seed(seed)
     tf.random.set_seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
-
-
-def determine_keypoint_groups(config_joint_idx):
-    """
-    Match the grouping logic used during training (body, left hand, right hand, face).
-    Copied from test_tflite_models.py to ensure identical preprocessing.
-    """
-    if not config_joint_idx:
-        return None
-
-    sorted_idx = sorted(config_joint_idx)
-    total_kpts = len(sorted_idx)
-    groups = []
-
-    if total_kpts >= 67:
-        face = sorted_idx[-25:]
-        right_hand = sorted_idx[-46:-25]
-        left_hand = sorted_idx[-67:-46]
-        body = sorted_idx[:-67]
-
-        if body:
-            groups.append(body)
-        if left_hand:
-            groups.append(left_hand)
-        if right_hand:
-            groups.append(right_hand)
-        if face:
-            groups.append(face)
-    else:
-        groups.append(sorted_idx)
-
-    return groups
 
 
 def load_split_dataset(data_path, split, joint_groups, max_samples=None):
@@ -199,6 +168,10 @@ def main():
         config = yaml.safe_load(f)
 
     joint_groups = determine_keypoint_groups(config.get("joint_idx", []))
+    _, _, label2name = load_label_maps(args.data_path)
+    if label2name:
+        example_key = sorted(label2name.keys())[0]
+        print(f"[LABELS] Loaded label names (e.g., {example_key} -> {label2name[example_key]})")
 
     max_seq_len = 64  # fixed for TFLite models
     dataset = load_split_dataset(args.data_path, args.split, joint_groups, args.max_samples)

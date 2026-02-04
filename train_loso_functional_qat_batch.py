@@ -30,6 +30,7 @@ import re
 import yaml
 from pathlib import Path
 from datetime import datetime
+from utils import resolve_output_base
 
 # Default LOSO users - can be overridden via --holdouts or auto-discovery
 DEFAULT_HOLDOUTS = "user01,user08,user11"
@@ -74,10 +75,14 @@ Example usage:
                         help="Run QAT only for specific user (e.g., 'user01') - USE THIS TO TEST FIRST!")
     parser.add_argument("--holdouts", type=str, default=DEFAULT_HOLDOUTS,
                         help="Comma-separated holdout users or 'all' to use all users")
-    parser.add_argument("--output_base_dir", type=str, default="exports/qat_loso",
-                        help="Base directory for QAT outputs (will create subdirs per user)")
+    parser.add_argument("--output_base_dir", type=str, default="",
+                        help="Base directory for QAT outputs (default: outputs/<dataset>/loso/exports/qat)")
     parser.add_argument("--exp_prefix", type=str, default="",
                         help="Experiment prefix used during training (optional)")
+    parser.add_argument("--dataset_name", type=str, default="arabic_asl",
+                        help="Dataset name prefix for experiments (default: arabic_asl)")
+    parser.add_argument("--output_root", type=str, default="",
+                        help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT)")
     parser.add_argument("--quantize_dense_names", nargs="*", default=None,
                         help="Dense layer name substrings to quantize (default: fc1,fc2,proj,q_proj,k_proj,v_proj,out_proj)")
     parser.add_argument("--skip_tflite_eval", action="store_true",
@@ -93,13 +98,10 @@ Example usage:
     return parser.parse_args()
 
 
-def build_experiment_prefix(config, exp_prefix=""):
+def build_experiment_prefix(config, exp_prefix="", dataset_name="arabic_asl"):
     if exp_prefix:
-        return f"{exp_prefix}_arabic_asl_LOSO_"
-    joint_idx = config.get("joint_idx") if isinstance(config, dict) else None
-    if isinstance(joint_idx, list) and len(joint_idx) > 0:
-        return f"arabic_asl_{len(joint_idx)}kpts_LOSO_"
-    return "arabic_asl_LOSO_"
+        return f"{exp_prefix}_{dataset_name}_LOSO_"
+    return f"{dataset_name}_LOSO_"
 
 
 def discover_users(base_data_path):
@@ -108,17 +110,22 @@ def discover_users(base_data_path):
     users = set()
     for p in glob.glob(all_glob):
         bn = os.path.basename(p)
-        m = re.match(r"(user\d{2})_G\d{2}_R\d{2}\.pkl$", bn)
+        m = re.match(r"(user\d+)_G\d{2}_.*\.pkl$", bn)
         if m:
             users.add(m.group(1))
     return sorted(users)
 
 
-def check_prerequisites(base_data_path, user):
+def check_prerequisites(base_data_path, user, dataset_name=None, output_root=None):
     """Check if required files exist for a LOSO user."""
     data_path = f"{base_data_path}_LOSO_{user}"
     from utils import resolve_checkpoint_dir
-    ck_dir = resolve_checkpoint_dir(f"{EXPERIMENT_PREFIX}{user}")
+    ck_dir = resolve_checkpoint_dir(
+        f"{EXPERIMENT_PREFIX}{user}",
+        dataset_name=dataset_name,
+        run_type="loso",
+        output_root=output_root,
+    )
     checkpoint_path = f"{ck_dir}/final_model.h5"
     
     missing = []
@@ -137,7 +144,12 @@ def run_qat_for_user(args, user):
     print(f"{'#'*80}\n")
     
     # Check prerequisites
-    missing = check_prerequisites(args.base_data_path, user)
+    missing = check_prerequisites(
+        args.base_data_path,
+        user,
+        dataset_name=args.dataset_name,
+        output_root=args.output_root or None,
+    )
     if missing:
         print(f"✗ Missing prerequisites for {user}:")
         for item in missing:
@@ -148,7 +160,12 @@ def run_qat_for_user(args, user):
     # Set up paths
     data_path = f"{args.base_data_path}_LOSO_{user}"
     from utils import resolve_checkpoint_dir
-    ck_dir = resolve_checkpoint_dir(f"{EXPERIMENT_PREFIX}{user}")
+    ck_dir = resolve_checkpoint_dir(
+        f"{EXPERIMENT_PREFIX}{user}",
+        dataset_name=args.dataset_name,
+        run_type="loso",
+        output_root=args.output_root or None,
+    )
     checkpoint_path = f"{ck_dir}/final_model.h5"
     output_dir = f"{args.output_base_dir}/{user}"
     
@@ -158,10 +175,12 @@ def run_qat_for_user(args, user):
     print(f"  Output dir: {output_dir}")
     print()
     
-    # Build command to run train_loso_functional_qat.py
+    # Build command to run train_loso_functional_qat.py (do not depend on CWD)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    qat_script = os.path.join(script_dir, "train_loso_functional_qat.py")
     cmd = [
         sys.executable,
-        "train_loso_functional_qat.py",
+        qat_script,
         "--config_path", args.config_path,
         "--data_path", data_path,
         "--checkpoint", checkpoint_path,
@@ -228,7 +247,18 @@ def main():
         config = {}
 
     global EXPERIMENT_PREFIX
-    EXPERIMENT_PREFIX = build_experiment_prefix(config, exp_prefix=args.exp_prefix)
+    EXPERIMENT_PREFIX = build_experiment_prefix(config, exp_prefix=args.exp_prefix, dataset_name=args.dataset_name)
+
+    if not args.output_base_dir:
+        output_base = resolve_output_base(
+            dataset_name=args.dataset_name,
+            run_type="loso",
+            output_root=args.output_root or None,
+        )
+        if output_base:
+            args.output_base_dir = str(output_base / "exports" / "qat")
+        else:
+            args.output_base_dir = "exports/qat_loso"
     
     # Resolve users to process
     if args.holdouts.strip().lower() == "all":
@@ -251,6 +281,7 @@ def main():
     print("="*80)
     print(f"Config: {args.config_path}")
     print(f"Base data path: {args.base_data_path}")
+    print(f"Dataset name: {args.dataset_name}")
     print(f"QAT epochs: {args.qat_epochs}")
     print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {args.lr}")
@@ -263,10 +294,11 @@ def main():
     print("="*80)
     print()
     
-    # Check if train_loso_functional_qat.py exists
-    if not os.path.exists("train_loso_functional_qat.py"):
-        print("ERROR: train_loso_functional_qat.py not found in current directory")
-        print("Please run this script from the signbart_tf directory")
+    # Check if train_loso_functional_qat.py exists (do not depend on CWD)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    qat_script = os.path.join(script_dir, "train_loso_functional_qat.py")
+    if not os.path.exists(qat_script):
+        print(f"ERROR: train_loso_functional_qat.py not found: {qat_script}")
         sys.exit(1)
     
     results = []
