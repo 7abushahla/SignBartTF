@@ -135,13 +135,21 @@ def normalize_keypoints_by_groups(
     
     Args:
         keypoints: numpy array of shape (T, K, 2)
-        num_keypoints: 65 (no face) or 90 (with face)
+    num_keypoints: 63 (pose+hands+face subset), 65 (no face) or 90 (with face)
     
     Returns:
         normalized keypoints of same shape
     """
     # Define group boundaries based on keypoint count
-    if num_keypoints == 65:
+    if num_keypoints == 63:
+        # 63 keypoints: Pose subset + Left Hand + Right Hand + Face subset
+        groups = [
+            (0, 14),   # Pose subset: 0-14 (15 points)
+            (15, 35),  # Left hand: 15-35 (21 points)
+            (36, 56),  # Right hand: 36-56 (21 points)
+            (57, 62),  # Face subset: 57-62 (6 points)
+        ]
+    elif num_keypoints == 65:
         # 65 keypoints: Pose + Left Hand + Right Hand (NO FACE)
         groups = [
             (0, 22),   # Pose: 0-22 (23 points)
@@ -232,7 +240,7 @@ def preprocess_for_inference(
     
     Args:
         keypoints: numpy array of shape (T, K, 2)
-        num_keypoints: 65 (no face) or 90 (with face)
+    num_keypoints: 63 (pose+hands+face subset), 65 (no face) or 90 (with face)
         max_len: fixed sequence length (default 64)
     
     Returns:

@@ -21,7 +21,8 @@ from dataset import SignDataset, create_data_loaders
 from model import SignBart
 from utils import (
     accuracy, top_k_accuracy, save_checkpoint, load_checkpoint,
-    count_model_parameters, get_keypoint_config, setup_gpu, ensure_dir_safe
+    count_model_parameters, get_keypoint_config, setup_gpu, ensure_dir_safe,
+    resolve_output_paths
 )
 
 # TFLite fixed sequence length (based on dataset analysis)
@@ -70,12 +71,20 @@ def get_default_args():
     parser.add_argument("--save_all_checkpoints", action="store_true",
                         help="Save checkpoint at every epoch (disk intensive)")
 
+    # Output organization
+    parser.add_argument("--dataset_name", type=str, default="",
+                        help="Dataset name for output separation (e.g., arabic_asl, lsa64)")
+    parser.add_argument("--run_type", type=str, default="",
+                        help="Run type for output separation (e.g., loso, full)")
+    parser.add_argument("--output_root", type=str, default="",
+                        help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT)")
+
     return parser
 
 
-def setup_logging(experiment_name):
+def setup_logging(experiment_name, log_dir=None):
     """Setup logging configuration."""
-    log_dir = Path("logs/run_logs")
+    log_dir = Path(log_dir) if log_dir else Path("logs/run_logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = str(log_dir / f"{experiment_name}.log")
     logging.basicConfig(
@@ -313,7 +322,13 @@ def evaluate(model, val_loader, epoch, epochs, logger):
 def main(args):
     """Main training function."""
     set_random_seed(args.seed)
-    logger = setup_logging(args.experiment_name)
+    output_paths = resolve_output_paths(
+        args.experiment_name,
+        dataset_name=args.dataset_name or None,
+        run_type=args.run_type or None,
+        output_root=args.output_root or None,
+    )
+    logger = setup_logging(args.experiment_name, log_dir=output_paths["logs_dir"])
     
     # Setup GPU
     _, device = setup_gpu(logger)
@@ -367,7 +382,7 @@ def main(args):
         print("Using default joint indices (hands only)")
         joint_idx = hands_only_groups
     
-    checkpoint_dir = "checkpoints_" + args.experiment_name
+    checkpoint_dir = str(output_paths["checkpoints_dir"])
     
     # Prepare data
     batch_size = config.get('batch_size', 1)
@@ -516,7 +531,7 @@ def main(args):
     callbacks.append(reduce_lr_callback)
     
     # CSVLogger for training history
-    training_csv_dir = Path("logs/training_csv")
+    training_csv_dir = Path(output_paths["logs_dir"]).parent / "training_csv"
     training_csv_dir.mkdir(parents=True, exist_ok=True)
     csv_logger = keras.callbacks.CSVLogger(
         str(training_csv_dir / f"{args.experiment_name}_training.csv"),
@@ -525,7 +540,7 @@ def main(args):
     callbacks.append(csv_logger)
     
     # TensorBoard (optional)
-    tensorboard_dir = os.path.join("logs", args.experiment_name)
+    tensorboard_dir = str(Path(output_paths["logs_dir"]).parent / "tensorboard" / args.experiment_name)
     tensorboard_callback = keras.callbacks.TensorBoard(
         log_dir=tensorboard_dir,
         histogram_freq=0,
@@ -535,10 +550,11 @@ def main(args):
     
     # Create directories safely
     ensure_dir_safe(checkpoint_dir)
-    ensure_dir_safe(str(Path("out-imgs") / args.experiment_name))
-    
+    out_imgs_dir = output_paths["out_imgs_dir"]
+    ensure_dir_safe(out_imgs_dir)
+
     print(f"Checkpoint directory: {checkpoint_dir}")
-    print(f"Output images directory: out-imgs/{args.experiment_name}/\n")
+    print(f"Output images directory: {out_imgs_dir}/\n")
     
     # Evaluation mode
     if args.task == "eval":
@@ -917,7 +933,7 @@ def main(args):
     plt.legend(loc="upper center", bbox_to_anchor=(0.5, 1.05), ncol=4, fancybox=True, shadow=True)
     ax.grid(True, alpha=0.3)
     
-    plot_path = "out-imgs/" + args.experiment_name + "/training_curves.png"
+    plot_path = str(Path(out_imgs_dir) / "training_curves.png")
     fig.savefig(plot_path, bbox_inches='tight', dpi=100)
     plt.close()
     

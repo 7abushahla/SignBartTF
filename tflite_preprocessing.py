@@ -4,9 +4,10 @@ Preprocessing utilities for TFLite model deployment.
 This module provides functions to prepare keypoint data for inference
 with the SignBART TFLite models (all LOSO variants).
 
-All LOSO models have IDENTICAL input/output signatures:
-  - Input: float32[1, 64, 90, 2] (keypoints) + float32[1, 64] (attention_mask)
-  - Output: float32[1, 10] (class logits)
+All LOSO models have IDENTICAL input/output signatures for a given dataset:
+  - Input: float32[1, 64, K, 2] (keypoints) + float32[1, 64] (attention_mask)
+  - Output: float32[1, C] (class logits)
+Defaults: K=90, C=10 for Arabic-ASL v2 configs.
 """
 
 import numpy as np
@@ -17,14 +18,18 @@ import numpy as np
 # - Covers 99%+ of training data (max was 75 frames)
 MAX_SEQ_LEN = 64
 
-# Number of keypoints per frame
-NUM_KEYPOINTS = 90  # 23 pose + 21 left hand + 21 right hand + 25 face
+# Number of keypoints per frame (default)
+DEFAULT_NUM_KEYPOINTS = 90  # 23 pose + 21 left hand + 21 right hand + 25 face
 
-# Number of output classes
-NUM_CLASSES = 10
+# Number of output classes (default)
+DEFAULT_NUM_CLASSES = 10
+
+# Backward-compatible aliases
+NUM_KEYPOINTS = DEFAULT_NUM_KEYPOINTS
+NUM_CLASSES = DEFAULT_NUM_CLASSES
 
 
-def preprocess_for_tflite(keypoints, max_len=MAX_SEQ_LEN):
+def preprocess_for_tflite(keypoints, max_len=MAX_SEQ_LEN, num_keypoints=DEFAULT_NUM_KEYPOINTS):
     """
     Prepare keypoints for TFLite inference with fixed sequence length.
     
@@ -32,11 +37,12 @@ def preprocess_for_tflite(keypoints, max_len=MAX_SEQ_LEN):
     (for sequences longer than max_len).
     
     Args:
-        keypoints: numpy array of shape [num_frames, 90, 2]
+        keypoints: numpy array of shape [num_frames, K, 2]
                    - num_frames: actual video length (variable)
-                   - 90: number of keypoints (23 pose + 21 left hand + 21 right hand + 25 face)
+                   - K: number of keypoints (e.g., 63, 65, 90)
                    - 2: (x, y) coordinates (normalized)
         max_len: fixed sequence length for TFLite (default: 64)
+        num_keypoints: expected number of keypoints (default: 90)
     
     Returns:
         keypoints_padded: numpy array [1, 64, 90, 2] ready for TFLite
@@ -56,8 +62,8 @@ def preprocess_for_tflite(keypoints, max_len=MAX_SEQ_LEN):
     
     num_frames, num_kpts, num_coords = keypoints.shape
     
-    if num_kpts != NUM_KEYPOINTS:
-        raise ValueError(f"Expected {NUM_KEYPOINTS} keypoints per frame, got {num_kpts}")
+    if num_kpts != num_keypoints:
+        raise ValueError(f"Expected {num_keypoints} keypoints per frame, got {num_kpts}")
     
     if num_coords != 2:
         raise ValueError(f"Expected 2 coordinates (x, y) per keypoint, got {num_coords}")
@@ -138,7 +144,7 @@ def postprocess_tflite_output(logits, return_top_k=5):
     }
 
 
-def load_tflite_model(model_path):
+def load_tflite_model(model_path, num_keypoints=DEFAULT_NUM_KEYPOINTS):
     """
     Load a TFLite model and return interpreter ready for inference.
     
@@ -168,7 +174,7 @@ def load_tflite_model(model_path):
     output_details = interpreter.get_output_details()
     
     # Verify expected input shape
-    expected_shape = (1, MAX_SEQ_LEN, NUM_KEYPOINTS, 2)
+    expected_shape = (1, MAX_SEQ_LEN, num_keypoints, 2)
     keypoints_input = next((d for d in input_details if len(d['shape']) == 4), None)
     
     if keypoints_input is None:
@@ -227,7 +233,7 @@ def run_inference(interpreter, input_details, output_details, keypoints, attenti
     return logits
 
 
-def inference_pipeline(model_path, keypoints):
+def inference_pipeline(model_path, keypoints, num_keypoints=DEFAULT_NUM_KEYPOINTS):
     """
     Complete inference pipeline: preprocess → inference → postprocess.
     
@@ -235,7 +241,7 @@ def inference_pipeline(model_path, keypoints):
     
     Args:
         model_path: path to .tflite model (any LOSO variant)
-        keypoints: raw keypoints from video [num_frames, 90, 2]
+        keypoints: raw keypoints from video [num_frames, K, 2]
     
     Returns:
         result: dict with predicted class, confidence, and probabilities
@@ -255,7 +261,7 @@ def inference_pipeline(model_path, keypoints):
     interpreter, input_details, output_details = load_tflite_model(model_path)
     
     # Preprocess
-    kpts_input, mask_input = preprocess_for_tflite(keypoints)
+    kpts_input, mask_input = preprocess_for_tflite(keypoints, num_keypoints=num_keypoints)
     
     # Inference
     logits = run_inference(interpreter, input_details, output_details, kpts_input, mask_input)

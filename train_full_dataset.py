@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-train_full_dataset.py - Train model on full dataset (all 12 users) using Functional API.
+train_full_dataset.py - Train model on full dataset (all users) using Functional API.
 
 This script trains on the complete dataset without LOSO cross-validation.
 Data structure: data/arabic-asl-90kpts/all/G01/, data/arabic-asl-90kpts/all/G02/, etc.
@@ -64,8 +64,12 @@ Example usage:
                         help="Path to pretrained model (.h5 file, optional)")
     parser.add_argument("--skip_final_eval", action="store_true",
                         help="Skip final evaluation (no test set available) - default: True for full dataset")
-    parser.add_argument("--exp_name", type=str, default="arabic_asl_full",
-                        help="Experiment name (default: arabic_asl_full)")
+    parser.add_argument("--exp_name", type=str, default="",
+                        help="Experiment name (default: <dataset_name>_full)")
+    parser.add_argument("--dataset_name", type=str, default="arabic_asl",
+                        help="Dataset name prefix for experiments (default: arabic_asl)")
+    parser.add_argument("--output_root", type=str, default="",
+                        help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT)")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Batch size (default: 1)")
     
@@ -75,6 +79,9 @@ Example usage:
 def main():
     """Main function."""
     args = parse_args()
+
+    if not args.exp_name:
+        args.exp_name = f"{args.dataset_name}_full"
     
     # Data path should be the base directory (where label2id.json is)
     # SignDataset will look for {data_path}/all/G01/, etc.
@@ -95,7 +102,7 @@ def main():
     
     # Print configuration
     print("="*80)
-    print("FULL DATASET TRAINING (All 12 Users)")
+    print("FULL DATASET TRAINING (All Users)")
     print("="*80)
     print(f"Config: {args.config_path}")
     print(f"Data path: {data_path}")
@@ -135,6 +142,9 @@ def main():
         config_path=args.config_path,
         data_path=data_path,
         experiment_name=args.exp_name,
+        dataset_name=args.dataset_name,
+        run_type="full",
+        output_root=args.output_root,
         epochs=args.epochs,
         lr=args.lr,
         seed=args.seed,

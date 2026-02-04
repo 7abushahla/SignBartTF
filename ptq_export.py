@@ -22,7 +22,7 @@ from tensorflow import keras
 import yaml
 
 from model_functional import build_signbart_functional_with_dict_inputs, ExtractLastValidToken
-from utils import ensure_dir_safe
+from utils import ensure_dir_safe, resolve_output_base
 from layers import Projection, ClassificationHead, PositionalEmbedding
 from encoder import Encoder, EncoderLayer
 from decoder import Decoder, DecoderLayer
@@ -49,8 +49,14 @@ def parse_args():
                         help="Path to model config YAML.")
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to trained model (.h5 or .keras).")
-    parser.add_argument("--output_dir", type=str, default="exports/ptq_export",
-                        help="Output directory for TFLite models.")
+    parser.add_argument("--output_dir", type=str, default="",
+                        help="Output directory for TFLite models (default: outputs/<dataset>/<run_type>/exports/ptq).")
+    parser.add_argument("--dataset_name", type=str, default="",
+                        help="Dataset name for output separation (e.g., arabic_asl, lsa64).")
+    parser.add_argument("--run_type", type=str, default="full",
+                        help="Run type for output separation (default: full).")
+    parser.add_argument("--output_root", type=str, default="",
+                        help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT).")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed.")
     return parser.parse_args()
@@ -132,6 +138,17 @@ def main():
 
     config = load_config(args.config_path)
     trained_model = load_trained_model(args.checkpoint)
+
+    if not args.output_dir:
+        output_base = resolve_output_base(
+            dataset_name=args.dataset_name or None,
+            run_type=args.run_type or None,
+            output_root=args.output_root or None,
+        )
+        if output_base:
+            args.output_dir = str(output_base / "exports" / "ptq")
+        else:
+            args.output_dir = "exports/ptq_export"
 
     num_keypoints = len(config["joint_idx"])
     dummy = {

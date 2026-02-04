@@ -30,7 +30,7 @@ from tensorflow import keras
 import yaml
 
 from model_functional import build_signbart_functional_with_dict_inputs, ExtractLastValidToken
-from utils import resolve_checkpoint_dir
+from utils import resolve_checkpoint_dir, resolve_output_base
 from layers import Projection, ClassificationHead, PositionalEmbedding
 from encoder import Encoder, EncoderLayer
 from decoder import Decoder, DecoderLayer
@@ -77,10 +77,14 @@ Example usage:
                         help="Export PTQ only for specific user (e.g., 'user01') - USE THIS TO TEST FIRST!")
     parser.add_argument("--holdouts", type=str, default=DEFAULT_HOLDOUTS,
                         help="Comma-separated holdout users or 'all' to use all users")
-    parser.add_argument("--output_base_dir", type=str, default="exports/ptq_loso",
-                        help="Base directory for PTQ outputs (will create subdirs per user)")
+    parser.add_argument("--output_base_dir", type=str, default="",
+                        help="Base directory for PTQ outputs (default: outputs/<dataset>/loso/exports/ptq)")
     parser.add_argument("--exp_prefix", type=str, default="",
                         help="Experiment prefix used during training (optional)")
+    parser.add_argument("--dataset_name", type=str, default="arabic_asl",
+                        help="Dataset name prefix for experiments (default: arabic_asl)")
+    parser.add_argument("--output_root", type=str, default="",
+                        help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
     return parser.parse_args()
@@ -103,19 +107,16 @@ def discover_users(base_data_path):
     users = set()
     for p in glob.glob(all_glob):
         bn = os.path.basename(p)
-        m = re.match(r"(user\d{2})_G\d{2}_R\d{2}\.pkl$", bn)
+        m = re.match(r"(user\d+)_G\d{2}_.*\.pkl$", bn)
         if m:
             users.add(m.group(1))
     return sorted(users)
 
 
-def build_experiment_prefix(config, exp_prefix=""):
+def build_experiment_prefix(config, exp_prefix="", dataset_name="arabic_asl"):
     if exp_prefix:
-        return f"{exp_prefix}_arabic_asl_LOSO_"
-    joint_idx = config.get("joint_idx") if isinstance(config, dict) else None
-    if isinstance(joint_idx, list) and len(joint_idx) > 0:
-        return f"arabic_asl_{len(joint_idx)}kpts_LOSO_"
-    return "arabic_asl_LOSO_"
+        return f"{exp_prefix}_{dataset_name}_LOSO_"
+    return f"{dataset_name}_LOSO_"
 
 
 def get_custom_objects():
@@ -235,7 +236,19 @@ def main():
     # Load config
     config = load_config(args.config_path)
     global EXPERIMENT_PREFIX
-    EXPERIMENT_PREFIX = build_experiment_prefix(config, exp_prefix=args.exp_prefix)
+    EXPERIMENT_PREFIX = build_experiment_prefix(config, exp_prefix=args.exp_prefix, dataset_name=args.dataset_name)
+
+    # Resolve output base directory (dataset/run-type aware)
+    if not args.output_base_dir:
+        output_base = resolve_output_base(
+            dataset_name=args.dataset_name,
+            run_type="loso",
+            output_root=args.output_root or None,
+        )
+        if output_base:
+            args.output_base_dir = str(output_base / "exports" / "ptq")
+        else:
+            args.output_base_dir = "exports/ptq_loso"
     
     # Resolve users to process
     if args.holdouts.strip().lower() == "all":
@@ -248,7 +261,12 @@ def main():
     if args.holdouts.strip().lower() == "all":
         filtered_users = []
         for user in users_to_run:
-            ck_dir = resolve_checkpoint_dir(f"{EXPERIMENT_PREFIX}{user}")
+            ck_dir = resolve_checkpoint_dir(
+                f"{EXPERIMENT_PREFIX}{user}",
+                dataset_name=args.dataset_name,
+                run_type="loso",
+                output_root=args.output_root or None,
+            )
             ckpt = os.path.join(ck_dir, "final_model.h5")
             if os.path.exists(ckpt):
                 filtered_users.append(user)
@@ -276,6 +294,7 @@ def main():
     print("="*80)
     print(f"Config: {args.config_path}")
     print(f"Base data path: {args.base_data_path}")
+    print(f"Dataset name: {args.dataset_name}")
     print(f"Output base dir: {args.output_base_dir}")
     print(f"Users to process: {len(users_to_run)} ({', '.join(users_to_run)})")
     print("="*80)
@@ -288,7 +307,12 @@ def main():
         print(f"{'#'*80}")
         
         # Set up paths (resolve actual checkpoint directory)
-        ck_dir = resolve_checkpoint_dir(f"{EXPERIMENT_PREFIX}{user}")
+        ck_dir = resolve_checkpoint_dir(
+            f"{EXPERIMENT_PREFIX}{user}",
+            dataset_name=args.dataset_name,
+            run_type="loso",
+            output_root=args.output_root or None,
+        )
         checkpoint_path = os.path.join(ck_dir, "final_model.h5")
         output_dir = f"{args.output_base_dir}/{user}"
         

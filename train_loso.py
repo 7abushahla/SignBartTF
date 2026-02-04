@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from datetime import datetime
 import tensorflow as tf
+from utils import resolve_output_paths
 
 DEFAULT_HOLDOUTS = "user01,user08,user11"
 
@@ -42,20 +43,20 @@ def discover_users(base_data_path):
     users = set()
     for p in glob.glob(all_glob):
         bn = os.path.basename(p)
-        m = re.match(r"(user\d{2})_G\d{2}_R\d{2}\.pkl$", bn)
+        m = re.match(r"(user\d+)_G\d{2}_.*\.pkl$", bn)
         if m:
             users.add(m.group(1))
     return sorted(users)
 
 
-def build_loso_configs(holdouts, all_users):
+def build_loso_configs(holdouts, all_users, dataset_name="arabic_asl"):
     configs = []
     for holdout in holdouts:
         train_users = [u for u in all_users if u != holdout]
         configs.append({
             "holdout_user": holdout,
             "train_users": ",".join(train_users),
-            "experiment_name": f"arabic_asl_LOSO_{holdout}"
+            "experiment_name": f"{dataset_name}_LOSO_{holdout}"
         })
     return configs
 
@@ -135,18 +136,27 @@ def extract_model_info_from_log(log_file):
     return model_info
 
 
-def save_run_metadata(experiment_name, config, args, start_time, end_time, success, 
-                      model_config=None, checkpoint_path=None):
+def save_run_metadata(experiment_name, config, args, start_time, end_time, success,
+                      model_config=None, checkpoint_path=None,
+                      dataset_name=None, run_type=None, output_root=None):
     """
     Save metadata about this training run for later retrieval.
     This ensures we can always identify the most recent run and its configuration.
     Now includes model configuration, parameters, and size information.
     """
-    metadata_dir = "training_metadata"
+    output_paths = resolve_output_paths(
+        experiment_name,
+        dataset_name=dataset_name,
+        run_type=run_type,
+        output_root=output_root,
+    )
+    metadata_dir = str(output_paths["training_metadata_dir"])
     os.makedirs(metadata_dir, exist_ok=True)
     
     metadata = {
         "experiment_name": experiment_name,
+        "dataset_name": dataset_name or args.dataset_name,
+        "run_type": run_type or "loso",
         "holdout_user": config["holdout_user"],
         "train_users": config["train_users"],
         "start_time": start_time.isoformat(),
@@ -159,9 +169,9 @@ def save_run_metadata(experiment_name, config, args, start_time, end_time, succe
         "seed": args.seed,
         "no_validation": args.no_validation,
         "success": success,
-        "log_file": f"logs/run_logs/{experiment_name}.log",
-        "eval_log_file": f"logs/run_logs/{experiment_name}_eval.log" if success else None,
-        "checkpoint_dir": f"checkpoints_{experiment_name}",
+        "log_file": str(Path(output_paths["logs_dir"]) / f"{experiment_name}.log"),
+        "eval_log_file": str(Path(output_paths["logs_dir"]) / f"{experiment_name}_eval.log") if success else None,
+        "checkpoint_dir": str(output_paths["checkpoints_dir"]),
         "timestamp": end_time.timestamp(),
         "framework": "tensorflow"
     }
@@ -189,8 +199,7 @@ def save_run_metadata(experiment_name, config, args, start_time, end_time, succe
             print(f"[ℹ] Model info: {summary}")
     
     # Try to extract additional info from log file
-    log_file = f"{experiment_name}.log"
-    log_info = extract_model_info_from_log(log_file)
+    log_info = extract_model_info_from_log(metadata["log_file"])
     if log_info:
         metadata["log_extracted_info"] = log_info
     
@@ -217,8 +226,9 @@ def save_run_metadata(experiment_name, config, args, start_time, end_time, succe
     return metadata_file
 
 
-def run_training(config_path, data_path, experiment_name, epochs, lr, seed, 
-                 pretrained_path="", no_validation=False, use_functional=False):
+def run_training(config_path, data_path, experiment_name, epochs, lr, seed,
+                 pretrained_path="", no_validation=False, use_functional=False,
+                 dataset_name=None, run_type=None, output_root=None):
     """Run training for one LOSO configuration."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     main_script = os.path.join(
@@ -235,6 +245,13 @@ def run_training(config_path, data_path, experiment_name, epochs, lr, seed,
         "--lr", str(lr),
         "--seed", str(seed)
     ]
+
+    if dataset_name:
+        cmd.extend(["--dataset_name", dataset_name])
+    if run_type:
+        cmd.extend(["--run_type", run_type])
+    if output_root:
+        cmd.extend(["--output_root", output_root])
     
     if pretrained_path:
         cmd.extend(["--pretrained_path", pretrained_path])
@@ -296,6 +313,10 @@ def main():
                         help="Skip final evaluation on test set after training")
     parser.add_argument("--exp_prefix", type=str, default="",
                         help="Prefix for experiment names (e.g., 'pose_hands' or 'hands_only')")
+    parser.add_argument("--dataset_name", type=str, default="arabic_asl",
+                        help="Dataset name prefix for experiments (default: arabic_asl)")
+    parser.add_argument("--output_root", type=str, default="",
+                        help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT)")
     parser.add_argument("--use_functional", action="store_true",
                         help="Use functional API model instead of nested model (for QAT compatibility)")
     
@@ -336,10 +357,11 @@ def main():
         sys.exit(1)
     
     print(f"\n{'='*80}")
-    print(f"Arabic ASL LOSO Training (TensorFlow) - {len(holdouts)} users")
+    print(f"{args.dataset_name} LOSO Training (TensorFlow) - {len(holdouts)} users")
     print(f"{'='*80}")
     print(f"Config: {args.config_path}")
     print(f"Base data path: {args.base_data_path}")
+    print(f"Dataset name: {args.dataset_name}")
     print(f"Epochs: {args.epochs}")
     print(f"Learning rate: {args.lr}")
     print(f"Seed: {args.seed}")
@@ -359,7 +381,7 @@ def main():
     print(f"{'='*80}\n")
     
     # Filter configurations if specific holdout requested
-    configs_to_run = build_loso_configs(holdouts, all_users)
+    configs_to_run = build_loso_configs(holdouts, all_users, dataset_name=args.dataset_name)
     if args.holdout_only:
         configs_to_run = [c for c in configs_to_run if c["holdout_user"] == args.holdout_only]
         if not configs_to_run:
@@ -391,7 +413,13 @@ def main():
         
         success = True
         train_start = train_end = None
-        checkpoint_dir = f"checkpoints_{exp_name}"
+        output_paths = resolve_output_paths(
+            exp_name,
+            dataset_name=args.dataset_name,
+            run_type="loso",
+            output_root=args.output_root or None,
+        )
+        checkpoint_dir = str(output_paths["checkpoints_dir"])
         
         if not args.skip_training:
             # Train model
@@ -404,7 +432,10 @@ def main():
                 seed=args.seed,
                 pretrained_path=args.pretrained_path,
                 no_validation=args.no_validation,
-                use_functional=args.use_functional
+                use_functional=args.use_functional,
+                dataset_name=args.dataset_name,
+                run_type="loso",
+                output_root=args.output_root or None,
             )
             
             # Save metadata after training (includes model config and parameters)
@@ -412,7 +443,10 @@ def main():
                 save_run_metadata(
                     exp_name, config, args, train_start, train_end, success,
                     model_config=model_config,
-                    checkpoint_path=checkpoint_dir if success else None
+                    checkpoint_path=checkpoint_dir if success else None,
+                    dataset_name=args.dataset_name,
+                    run_type="loso",
+                    output_root=args.output_root or None,
                 )
         
         # NOTE: Evaluation is already performed inline at the end of training in main.py
@@ -438,13 +472,23 @@ def main():
     print(f"Results saved to:")
     for result in results:
         exp_name = result["experiment"]
+        output_paths = resolve_output_paths(
+            exp_name,
+            dataset_name=args.dataset_name,
+            run_type="loso",
+            output_root=args.output_root or None,
+        )
+        log_dir = output_paths["logs_dir"]
+        metadata_dir = output_paths["training_metadata_dir"]
+        checkpoints_dir = output_paths["checkpoints_dir"]
+        plots_dir = output_paths["out_imgs_dir"]
         print(f"\n{exp_name}:")
-        print(f"  - Log: logs/run_logs/{exp_name}.log")
+        print(f"  - Log: {log_dir}/{exp_name}.log")
         if not args.skip_training:
-            print(f"  - Evaluation log: logs/run_logs/{exp_name}_eval.log")
-        print(f"  - Metadata: training_metadata/{exp_name}_latest.json")
-        print(f"  - Checkpoints: checkpoints_{exp_name}/")
-        print(f"  - Plots: out-imgs/{exp_name}/training_curves.png")
+            print(f"  - Evaluation log: {log_dir}/{exp_name}_eval.log")
+        print(f"  - Metadata: {metadata_dir}/{exp_name}_latest.json")
+        print(f"  - Checkpoints: {checkpoints_dir}/")
+        print(f"  - Plots: {plots_dir}/training_curves.png")
     
     # Remind about next steps
     print(f"\n{'='*80}")
@@ -465,7 +509,7 @@ def main():
         print(f"\nTo convert best model to TFLite:")
         print(f"  python convert_to_tflite.py \\")
         print(f"      --config {args.config_path} \\")
-        print(f"      --checkpoint checkpoints_[exp_name]/checkpoint_*_best_val.h5 \\")
+        print(f"      --checkpoint outputs/{args.dataset_name}/loso/checkpoints/<exp_name>/checkpoint_*_best_val.h5 \\")
         print(f"      --quantization float16")
     print(f"{'='*80}\n")
 

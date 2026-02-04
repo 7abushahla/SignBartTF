@@ -4,6 +4,8 @@
 
 The `train_loso.py` script automates Leave-One-Subject-Out cross-validation for the Arabic ASL dataset. This is the recommended approach for evaluating model performance on unseen subjects.
 
+**Output layout update**: results now live under `outputs/<dataset>/<run_type>/...` by default (e.g., `outputs/arabic_asl/loso/checkpoints/arabic_asl_LOSO_user01`). Legacy paths like `checkpoints_*`, `exports/`, `results/`, and `logs/` may still exist for older runs.
+
 ## What is LOSO?
 
 **Leave-One-Subject-Out (LOSO)** cross-validation:

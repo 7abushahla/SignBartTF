@@ -7,6 +7,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAW_DIR="${RAW_DIR:-"$ROOT_DIR/MLR511-ArabicSignLanguage-Dataset-MP4"}"
 FLIPPED_DIR="${FLIPPED_DIR:-"$ROOT_DIR/MLR511-ArabicSignLanguage-Dataset-MP4_FLIPPED"}"
 KEYPOINTS_COUNT="${KEYPOINTS_COUNT:-63}"
+DATASET_NAME="${DATASET_NAME:-arabic_asl}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-"$ROOT_DIR/outputs"}"
 
 if [[ -z "${DATA_DIR:-}" ]]; then
   case "$KEYPOINTS_COUNT" in
@@ -45,21 +47,25 @@ RUN_FULL_DATASET="${RUN_FULL_DATASET:-1}"
 FULL_EPOCHS="${FULL_EPOCHS:-$EPOCHS}"
 FULL_LR="${FULL_LR:-$LR}"
 FULL_SEED="${FULL_SEED:-$SEED}"
-FULL_EXP_NAME="${FULL_EXP_NAME:-arabic_asl_full}"
+FULL_EXP_NAME="${FULL_EXP_NAME:-${DATASET_NAME}_full}"
 
 # Quantization / conversion settings
 RUN_PTQ="${RUN_PTQ:-1}"
 RUN_QAT="${RUN_QAT:-1}"
 RUN_COLLECT="${RUN_COLLECT:-1}"
 
+# Data prep toggles (useful for keypoints-only datasets)
+SKIP_FLIP="${SKIP_FLIP:-0}"
+SKIP_EXTRACT="${SKIP_EXTRACT:-0}"
+
 QAT_EPOCHS="${QAT_EPOCHS:-20}"
 QAT_BATCH_SIZE="${QAT_BATCH_SIZE:-4}"
 QAT_LR="${QAT_LR:-5e-5}"
 
-PTQ_LOSO_DIR="${PTQ_LOSO_DIR:-exports/ptq_loso}"
-PTQ_FULL_DIR="${PTQ_FULL_DIR:-exports/ptq_full}"
-QAT_LOSO_DIR="${QAT_LOSO_DIR:-exports/qat_loso}"
-QAT_FULL_DIR="${QAT_FULL_DIR:-exports/qat_full}"
+PTQ_LOSO_DIR="${PTQ_LOSO_DIR:-$OUTPUT_ROOT/$DATASET_NAME/loso/exports/ptq}"
+PTQ_FULL_DIR="${PTQ_FULL_DIR:-$OUTPUT_ROOT/$DATASET_NAME/full/exports/ptq}"
+QAT_LOSO_DIR="${QAT_LOSO_DIR:-$OUTPUT_ROOT/$DATASET_NAME/loso/exports/qat}"
+QAT_FULL_DIR="${QAT_FULL_DIR:-$OUTPUT_ROOT/$DATASET_NAME/full/exports/qat}"
 
 # Flip settings
 FLIP_USERS="${FLIP_USERS:-"user01,user02"}"
@@ -238,6 +244,8 @@ train_model() {
     --epochs "$EPOCHS"
     --lr "$LR"
     --seed "$SEED"
+    --dataset_name "$DATASET_NAME"
+    --output_root "$OUTPUT_ROOT"
   )
 
   if [[ -n "$HOLDOUT_ONLY" ]]; then
@@ -267,7 +275,9 @@ train_full_dataset() {
     --epochs "$FULL_EPOCHS" \
     --lr "$FULL_LR" \
     --seed "$FULL_SEED" \
-    --exp_name "$FULL_EXP_NAME"
+    --exp_name "$FULL_EXP_NAME" \
+    --dataset_name "$DATASET_NAME" \
+    --output_root "$OUTPUT_ROOT"
 }
 
 evaluate_model() {
@@ -285,6 +295,9 @@ evaluate_model() {
     --run_evaluation \
     --config_path "$CONFIG_PATH" \
     --base_data_path "$DATA_DIR" \
+    --dataset_name "$DATASET_NAME" \
+    --run_type "loso" \
+    --output_root "$OUTPUT_ROOT" \
     --ptq_base_dir "$PTQ_LOSO_DIR" \
     --qat_base_dir "$QAT_LOSO_DIR"
 }
@@ -301,6 +314,8 @@ run_ptq() {
       --config_path "$CONFIG_PATH" \
       --base_data_path "$DATA_DIR" \
       --holdouts "$HOLDOUTS" \
+      --dataset_name "$DATASET_NAME" \
+      --output_root "$OUTPUT_ROOT" \
       --output_base_dir "$PTQ_LOSO_DIR"
   else
     log "PTQ (LOSO): skipped (RUN_LOSO=$RUN_LOSO)."
@@ -309,7 +324,7 @@ run_ptq() {
   log "PTQ (Full dataset): exporting dynamic-range INT8 model"
   python "$ROOT_DIR/ptq_export.py" \
     --config_path "$CONFIG_PATH" \
-    --checkpoint "checkpoints_${FULL_EXP_NAME}/final_model.h5" \
+    --checkpoint "$OUTPUT_ROOT/$DATASET_NAME/full/checkpoints/${FULL_EXP_NAME}/final_model.h5" \
     --output_dir "$PTQ_FULL_DIR"
 }
 
@@ -325,6 +340,8 @@ run_qat() {
       --config_path "$CONFIG_PATH" \
       --base_data_path "$DATA_DIR" \
       --holdouts "$HOLDOUTS" \
+      --dataset_name "$DATASET_NAME" \
+      --output_root "$OUTPUT_ROOT" \
       --output_base_dir "$QAT_LOSO_DIR" \
       --qat_epochs "$QAT_EPOCHS" \
       --batch_size "$QAT_BATCH_SIZE" \
@@ -338,7 +355,7 @@ run_qat() {
   python "$ROOT_DIR/train_loso_functional_qat.py" \
     --config_path "$CONFIG_PATH" \
     --data_path "$DATA_DIR" \
-    --checkpoint "checkpoints_${FULL_EXP_NAME}/final_model.h5" \
+    --checkpoint "$OUTPUT_ROOT/$DATASET_NAME/full/checkpoints/${FULL_EXP_NAME}/final_model.h5" \
     --output_dir "$QAT_FULL_DIR" \
     --qat_epochs "$QAT_EPOCHS" \
     --batch_size "$QAT_BATCH_SIZE" \
@@ -349,8 +366,26 @@ run_qat() {
 
 main() {
   ensure_conda_env
-  flip_videos_if_needed
-  extract_keypoints_if_needed
+  if [[ "$SKIP_FLIP" == "1" ]]; then
+    log "Flip step: skipped (SKIP_FLIP=$SKIP_FLIP)."
+  else
+    flip_videos_if_needed
+  fi
+
+  if [[ "$SKIP_EXTRACT" == "1" ]]; then
+    if [[ -d "$DATA_DIR/all" ]] && find "$DATA_DIR/all" -type f -name "*.pkl" -print -quit | grep -q .; then
+      log "Keypoint extraction: skipped (SKIP_EXTRACT=$SKIP_EXTRACT)."
+    else
+      echo "SKIP_EXTRACT=1 but no keypoints found in $DATA_DIR/all. Aborting." >&2
+      exit 1
+    fi
+  else
+    if [[ "$SKIP_FLIP" == "1" && ! -d "$FLIPPED_DIR" ]]; then
+      echo "SKIP_FLIP=1 but FLIPPED_DIR does not exist: $FLIPPED_DIR" >&2
+      exit 1
+    fi
+    extract_keypoints_if_needed
+  fi
   create_loso_if_needed
   train_model
   train_full_dataset

@@ -39,18 +39,27 @@ signbart_tf/
 │   │   ├── test/                    # Test samples (user01)
 │   │   └── ...
 │   └── ...
-├── checkpoints_*/                   # Training checkpoints (variant-specific prefixes)
-├── exports/                         # Quantized models
-│   ├── ptq_loso/                    # PTQ models (per user)
-│   ├── qat_loso/                    # QAT models (per user)
-│   ├── ptq_full/                    # PTQ model (full dataset)
-│   └── qat_full/                    # QAT model (full dataset)
-└── results/                         # Evaluation results
-    ├── confusion_matrices/          # Confusion matrix PNGs
-    ├── model_info.csv               # Parameters & FLOPs
-    ├── summary_table.csv            # Accuracy comparison
-    └── per_class_accuracy.csv       # Per-gesture accuracy
+├── outputs/                         # Dataset/run-type separated outputs (default)
+│   └── <dataset>/                   # e.g., arabic_asl, lsa64
+│       ├── loso/
+│       │   ├── checkpoints/         # FP32 checkpoints + FP32 TFLite
+│       │   ├── exports/ptq/         # PTQ models (per user)
+│       │   ├── exports/qat/         # QAT models (per user)
+│       │   ├── logs/run_logs/       # Training logs
+│       │   ├── out-imgs/            # Training curves
+│       │   ├── training_metadata/   # Structured metadata
+│       │   └── results/             # Evaluation results
+│       └── full/
+│           ├── checkpoints/
+│           ├── exports/ptq/
+│           ├── exports/qat/
+│           ├── logs/run_logs/
+│           ├── out-imgs/
+│           └── results/
 ```
+
+**Output root**: defaults to `outputs/` (or `SIGNBART_OUTPUT_ROOT` if set). You can override with `--output_root`.
+Legacy folders (`checkpoints_*`, `exports/`, `logs/`, `results/`, `out-imgs/`, `training_metadata/`) may still exist for older runs.
 
 ---
 
@@ -105,6 +114,54 @@ python fix_loso.py \
     --holdouts user01,user08,user11
 ```
 
+#### LSA64 (63 keypoints) Quickstart
+
+LSA64 uses 63-keypoint pickles and 64 gesture classes (G01-G64). Use `--holdouts all` to run LOSO across all 10 users.
+
+1) Create LOSO splits:
+```bash
+python fix_loso.py \
+    --base_root data/lsa64-63kpts \
+    --holdouts all
+```
+
+2) FP32 LOSO training (single user smoke test):
+```bash
+python train_loso_functional.py \
+    --config_path configs/lsa64-63kpts.yaml \
+    --base_data_path data/lsa64-63kpts \
+    --holdout_only user0001 \
+    --epochs 1 \
+    --dataset_name lsa64 \
+    --output_root outputs
+```
+
+3) PTQ / QAT exports (all users):
+```bash
+python ptq_export_batch.py \
+    --config_path configs/lsa64-63kpts.yaml \
+    --base_data_path data/lsa64-63kpts \
+    --holdouts all \
+    --dataset_name lsa64 \
+    --output_root outputs
+
+python train_loso_functional_qat_batch.py \
+    --config_path configs/lsa64-63kpts.yaml \
+    --base_data_path data/lsa64-63kpts \
+    --holdouts all \
+    --dataset_name lsa64 \
+    --output_root outputs
+```
+
+4) Evaluate TFLite models (example user0001):
+```bash
+python test_tflite_models.py \
+    --config_path configs/lsa64-63kpts.yaml \
+    --data_path data/lsa64-63kpts_LOSO_user0001 \
+    --fp32_tflite outputs/lsa64/loso/checkpoints/lsa64_LOSO_user0001/final_model_fp32.tflite \
+    --ptq_tflite outputs/lsa64/loso/exports/ptq/user0001/model_dynamic_int8.tflite
+```
+
 Then train with the 65-keypoint config:
 
 ```bash
@@ -113,7 +170,9 @@ python train_loso_functional.py \
     --base_data_path data/arabic-asl-65kpts \
     --epochs 80 \
     --lr 2e-4 \
-    --no_validation
+    --no_validation \
+    --dataset_name arabic_asl \
+    --output_root outputs
 ```
 
 Default seed is 42 (override with --seed as needed).
@@ -133,10 +192,12 @@ python train_loso_functional.py \
     --base_data_path data/arabic-asl-65kpts \
     --epochs 80 \
     --lr 2e-4 \
-    --no_validation
+    --no_validation \
+    --dataset_name arabic_asl \
+    --output_root outputs
 ```
 
-**Output**: 3 FP32 models in `checkpoints_arabic_asl_LOSO_user01/`, `user08/`, `user11/`
+**Output**: FP32 models in `outputs/arabic_asl/loso/checkpoints/arabic_asl_LOSO_user01/`, `user08/`, `user11/`
 
 **Quick test** (single user, 2 epochs):
 
@@ -147,7 +208,9 @@ python train_loso_functional.py \
     --holdout_only user01 \
     --epochs 2 \
     --lr 2e-4 \
-    --no_validation
+    --no_validation \
+    --dataset_name arabic_asl \
+    --output_root outputs
 ```
 
 If you want the 90-keypoint variant (with face), replace the config and data paths with:
@@ -167,10 +230,12 @@ python train_full_dataset.py \
     --base_data_path data/arabic-asl-65kpts \
     --epochs 80 \
     --lr 2e-4 \
-    --seed 42
+    --seed 42 \
+    --dataset_name arabic_asl \
+    --output_root outputs
 ```
 
-**Output**: `checkpoints_arabic_asl_full/final_model.h5` and `final_model_fp32.tflite`
+**Output**: `outputs/arabic_asl/full/checkpoints/arabic_asl_full/final_model.h5` and `final_model_fp32.tflite`
 
 ---
 
@@ -255,21 +320,21 @@ python ptq_export_batch.py \
 # For single LOSO model (e.g., user01)
 python ptq_export.py \
     --config_path configs/arabic-asl-65kpts.yaml \
-    --checkpoint checkpoints_arabic_asl_LOSO_user01/final_model.h5 \
-    --output_dir exports/ptq_arabic_asl_user01
+    --checkpoint outputs/arabic_asl/loso/checkpoints/arabic_asl_LOSO_user01/final_model.h5 \
+    --output_dir outputs/arabic_asl/loso/exports/ptq/user01
 
 # For full dataset model
 python ptq_export.py \
     --config_path configs/arabic-asl-65kpts.yaml \
-    --checkpoint checkpoints_arabic_asl_full/final_model.h5 \
-    --output_dir exports/ptq_full
+    --checkpoint outputs/arabic_asl/full/checkpoints/arabic_asl_full/final_model.h5 \
+    --output_dir outputs/arabic_asl/full/exports/ptq
 
 # For a keypoint variant (example)
 python ptq_export_batch.py \
     --config_path configs/arabic-asl-42kpts-hands.yaml \
     --base_data_path data/arabic-asl-65kpts \
     --exp_prefix arabic_asl_42kpts_hands \
-    --output_base_dir exports/ptq_loso_arabic_asl_42kpts_hands
+    --output_base_dir outputs/arabic_asl/loso/exports/ptq_arabic_asl_42kpts_hands
 ```
 
 ---
@@ -292,8 +357,8 @@ python train_loso_functional_qat_batch.py \
 python train_loso_functional_qat.py \
     --config_path configs/arabic-asl-65kpts.yaml \
     --data_path data/arabic-asl-65kpts_LOSO_user01 \
-    --checkpoint checkpoints_arabic_asl_LOSO_user01/final_model.h5 \
-    --output_dir exports/qat_finetune_user01 \
+    --checkpoint outputs/arabic_asl/loso/checkpoints/arabic_asl_LOSO_user01/final_model.h5 \
+    --output_dir outputs/arabic_asl/loso/exports/qat/user01 \
     --batch_size 4 \
     --qat_epochs 20 \
     --lr 5e-5
@@ -302,8 +367,8 @@ python train_loso_functional_qat.py \
 python train_loso_functional_qat.py \
     --config_path configs/arabic-asl-65kpts.yaml \
     --data_path data/arabic-asl-65kpts \
-    --checkpoint checkpoints_arabic_asl_full/final_model.h5 \
-    --output_dir exports/qat_full \
+    --checkpoint outputs/arabic_asl/full/checkpoints/arabic_asl_full/final_model.h5 \
+    --output_dir outputs/arabic_asl/full/exports/qat \
     --batch_size 4 \
     --qat_epochs 20 \
     --lr 5e-5 \
@@ -314,7 +379,7 @@ python train_loso_functional_qat_batch.py \
     --config_path configs/arabic-asl-42kpts-hands.yaml \
     --base_data_path data/arabic-asl-65kpts \
     --exp_prefix arabic_asl_42kpts_hands \
-    --output_base_dir exports/qat_loso_arabic_asl_42kpts_hands \
+    --output_base_dir outputs/arabic_asl/loso/exports/qat_arabic_asl_42kpts_hands \
     --batch_size 4 \
     --qat_epochs 20 \
     --lr 5e-5 \
@@ -353,7 +418,7 @@ python evaluate_tflite_single.py \
     --config_path configs/arabic-asl-65kpts.yaml \
     --data_path data/arabic-asl-65kpts_LOSO_user01 \
     --split test \
-    --tflite_path checkpoints_arabic_asl_full/final_model_fp32.tflite
+    --tflite_path outputs/arabic_asl/full/checkpoints/arabic_asl_full/final_model_fp32.tflite
 ```
 
 ---
@@ -367,16 +432,16 @@ Side-by-side comparison of all three quantization approaches:
 python test_tflite_models.py \
     --config_path configs/arabic-asl-65kpts.yaml \
     --data_path data/arabic-asl-65kpts_LOSO_user01 \
-    --fp32_tflite checkpoints_arabic_asl_LOSO_user01/final_model_fp32.tflite \
-    --ptq_tflite exports/ptq_arabic_asl_user01/model_dynamic_int8.tflite \
-    --qat_tflite exports/qat_finetune_user01/qat_dynamic_int8.tflite
+    --fp32_tflite outputs/arabic_asl/loso/checkpoints/arabic_asl_LOSO_user01/final_model_fp32.tflite \
+    --ptq_tflite outputs/arabic_asl/loso/exports/ptq/user01/model_dynamic_int8.tflite \
+    --qat_tflite outputs/arabic_asl/loso/exports/qat/user01/qat_dynamic_int8.tflite
 
 # Compare FP32 vs PTQ only
 python test_tflite_models.py \
     --config_path configs/arabic-asl-65kpts.yaml \
     --data_path data/arabic-asl-65kpts_LOSO_user01 \
-    --fp32_tflite checkpoints_arabic_asl_LOSO_user01/final_model_fp32.tflite \
-    --ptq_tflite exports/ptq_arabic_asl_user01/model_dynamic_int8.tflite
+    --fp32_tflite outputs/arabic_asl/loso/checkpoints/arabic_asl_LOSO_user01/final_model_fp32.tflite \
+    --ptq_tflite outputs/arabic_asl/loso/exports/ptq/user01/model_dynamic_int8.tflite
 ```
 
 ---
@@ -388,7 +453,7 @@ Detailed analysis of a single prediction (with raw keypoint dump):
 ```bash
 python test_single_sample.py \
     --test_dir data/arabic-asl-65kpts_LOSO_user01/test \
-    --tflite_model checkpoints_arabic_asl_LOSO_user01/final_model_fp32.tflite \
+    --tflite_model outputs/arabic_asl/loso/checkpoints/arabic_asl_LOSO_user01/final_model_fp32.tflite \
     --config_path configs/arabic-asl-65kpts.yaml \
     --sample_file data/arabic-asl-65kpts_LOSO_user01/test/G10/user01_G10_R10.pkl \
     --sample_label G10 \
@@ -414,8 +479,8 @@ python collect_results.py \
     --base_data_path data/arabic-asl-65kpts \
     --seed_list "42,511,999983,1000003,324528439" \
     --exp_prefix_base arabic_asl_65kpts_pose_hands \
-    --ptq_base_dir "exports/ptq_loso_arabic_asl_65kpts_pose_hands_seed{seed}" \
-    --qat_base_dir "exports/qat_loso_arabic_asl_65kpts_pose_hands_seed{seed}"
+    --ptq_base_dir "outputs/arabic_asl/loso/exports/ptq_arabic_asl_65kpts_pose_hands_seed{seed}" \
+    --qat_base_dir "outputs/arabic_asl/loso/exports/qat_arabic_asl_65kpts_pose_hands_seed{seed}"
 
 # Variant example (with exp_prefix + custom PTQ/QAT export dirs)
 python collect_results.py \
@@ -423,16 +488,16 @@ python collect_results.py \
     --config_path configs/arabic-asl-42kpts-hands.yaml \
     --base_data_path data/arabic-asl-65kpts \
     --exp_prefix arabic_asl_42kpts_hands \
-    --ptq_base_dir exports/ptq_loso_arabic_asl_42kpts_hands \
-    --qat_base_dir exports/qat_loso_arabic_asl_42kpts_hands
+    --ptq_base_dir outputs/arabic_asl/loso/exports/ptq_arabic_asl_42kpts_hands \
+    --qat_base_dir outputs/arabic_asl/loso/exports/qat_arabic_asl_42kpts_hands
 ```
 
-**Output**:
-- `results/experiment_results_YYYYMMDD_HHMMSS_*.txt` - Full text report
-- `results/confusion_matrices/*.png` - 9 confusion matrices (3 users × 3 models)
-- `results/model_info.csv` - Parameters, FLOPs
-- `results/summary_table.csv` - FP32 vs PTQ vs QAT comparison
-- `results/per_class_accuracy.csv` - Per-gesture accuracy
+**Output** (default):
+- `outputs/arabic_asl/loso/results/experiment_results_YYYYMMDD_HHMMSS_*.txt` - Full text report
+- `outputs/arabic_asl/loso/results/confusion_matrices/*.png` - 9 confusion matrices (3 users × 3 models)
+- `outputs/arabic_asl/loso/results/model_info.csv` - Parameters, FLOPs
+- `outputs/arabic_asl/loso/results/summary_table.csv` - FP32 vs PTQ vs QAT comparison
+- `outputs/arabic_asl/loso/results/per_class_accuracy.csv` - Per-gesture accuracy
 
 ---
 
@@ -442,14 +507,14 @@ Copy the exported TFLite model into the Flutter app assets and rebuild the app:
 
 ```bash
 # Example: use QAT INT8 model for user01
-cp exports/qat_loso/user01/qat_dynamic_int8.tflite \
+cp outputs/arabic_asl/loso/exports/qat/user01/qat_dynamic_int8.tflite \
     ../assets/models/final_model_qat_int8.tflite
 ```
 
 For keypoint variants (custom exp_prefix export dirs), update the source path accordingly:
 
 ```bash
-cp exports/qat_loso_arabic_asl_42kpts_hands/user01/qat_dynamic_int8.tflite \
+cp outputs/arabic_asl/loso/exports/qat_arabic_asl_42kpts_hands/user01/qat_dynamic_int8.tflite \
     ../assets/models/final_model_qat_int8.tflite
 ```
 

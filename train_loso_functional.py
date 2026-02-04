@@ -71,6 +71,10 @@ Example usage:
                         help="Skip final evaluation on test set after training")
     parser.add_argument("--exp_prefix", type=str, default="",
                         help="Prefix for experiment names (e.g., 'functional' to distinguish from nested)")
+    parser.add_argument("--dataset_name", type=str, default="arabic_asl",
+                        help="Dataset name prefix for experiments (default: arabic_asl)")
+    parser.add_argument("--output_root", type=str, default="",
+                        help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT)")
     
     args = parser.parse_args()
     
@@ -113,6 +117,11 @@ Example usage:
     
     if args.exp_prefix:
         cmd.extend(["--exp_prefix", args.exp_prefix])
+
+    if args.dataset_name:
+        cmd.extend(["--dataset_name", args.dataset_name])
+    if args.output_root:
+        cmd.extend(["--output_root", args.output_root])
     
     # Print info
     print("="*80)
