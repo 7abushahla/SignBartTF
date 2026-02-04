@@ -355,17 +355,26 @@ run_qat() {
 
   if [[ "$RUN_LOSO" == "1" ]]; then
     log "QAT (LOSO): fine-tuning and export"
-    python "$ROOT_DIR/train_loso_functional_qat_batch.py" \
-      --config_path "$CONFIG_PATH" \
-      --base_data_path "$DATA_DIR" \
-      --holdouts "$HOLDOUTS" \
-      --dataset_name "$DATASET_NAME" \
-      --output_root "$OUTPUT_ROOT" \
-      --output_base_dir "$QAT_LOSO_DIR" \
-      --qat_epochs "$QAT_EPOCHS" \
-      --batch_size "$QAT_BATCH_SIZE" \
-      --lr "$QAT_LR" \
+    cmd=(
+      python "$ROOT_DIR/train_loso_functional_qat_batch.py"
+      --config_path "$CONFIG_PATH"
+      --base_data_path "$DATA_DIR"
+      --holdouts "$HOLDOUTS"
+      --dataset_name "$DATASET_NAME"
+      --output_root "$OUTPUT_ROOT"
+      --output_base_dir "$QAT_LOSO_DIR"
+      --qat_epochs "$QAT_EPOCHS"
+      --batch_size "$QAT_BATCH_SIZE"
+      --lr "$QAT_LR"
       --seed "$SEED"
+    )
+
+    # No validation by default (matches FP32 training behavior).
+    if [[ "$NO_VALIDATION" == "1" ]]; then
+      cmd+=(--no_validation)
+    fi
+
+    "${cmd[@]}"
   else
     log "QAT (LOSO): skipped (RUN_LOSO=$RUN_LOSO)."
   fi
