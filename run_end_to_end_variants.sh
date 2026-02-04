@@ -67,28 +67,46 @@ ensure_conda_env() {
     return 0
   fi
 
+  # Prefer sourcing conda.sh from common locations to avoid `conda info` issues in
+  # some environments (plugins / sandbox restrictions).
+  local -a conda_sh_candidates=()
+  if [[ -n "${CONDA_SH:-}" ]]; then
+    conda_sh_candidates+=("${CONDA_SH}")
+  fi
+  conda_sh_candidates+=(
+    "$HOME/anaconda3/etc/profile.d/conda.sh"
+    "$HOME/miniconda3/etc/profile.d/conda.sh"
+    "$HOME/mambaforge/etc/profile.d/conda.sh"
+    "/opt/conda/etc/profile.d/conda.sh"
+  )
+
+  for conda_sh in "${conda_sh_candidates[@]}"; do
+    if [[ -f "$conda_sh" ]]; then
+      # shellcheck disable=SC1090
+      source "$conda_sh"
+      if conda activate "$env_name" >/dev/null 2>&1; then
+        log "Activated conda env: $env_name"
+        return 0
+      fi
+    fi
+  done
+
+  # Fallback: try to locate conda.sh via `conda info --base`
   if command -v conda >/dev/null 2>&1; then
     local conda_base
     conda_base=$(conda info --base 2>/dev/null || true)
     if [[ -n "$conda_base" && -f "$conda_base/etc/profile.d/conda.sh" ]]; then
       # shellcheck disable=SC1090
       source "$conda_base/etc/profile.d/conda.sh"
-      conda activate "$env_name"
-      log "Activated conda env: $env_name"
-      return 0
-    elif [[ -f "$(which conda)" ]]; then
-      # As a fallback, try `conda activate` directly (may fail in some shells)
       if conda activate "$env_name" >/dev/null 2>&1; then
         log "Activated conda env: $env_name"
         return 0
       fi
     fi
-    echo "Failed to activate conda env '$env_name'. Please activate it manually and retry." >&2
-    exit 1
-  else
-    echo "Conda not found. Please activate environment '$env_name' before running this script." >&2
-    exit 1
   fi
+
+  echo "Failed to activate conda env '$env_name'. Please activate it manually and retry." >&2
+  exit 1
 }
 
 should_flip_user() {

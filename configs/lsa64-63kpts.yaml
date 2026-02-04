@@ -1,0 +1,103 @@
+# configs/lsa64-63kpts.yaml
+# Configuration for LSA64 - 63 KEYPOINTS
+# Pose subset (15) + Left Hand (21) + Right Hand (21) + Face subset (6)
+# Matches 63-keypoint v2.1 layout (Pose subset + Hands + Face subset)
+
+activation_dropout: 0.3
+attention_dropout: 0.0
+classifier_dropout: 0.7
+d_model: 144
+decoder_attention_heads: 8
+decoder_ffn_dim: 144
+decoder_layerdrop: 0.4
+decoder_layers: 2
+dropout: 0.3
+encoder_attention_heads: 8
+encoder_ffn_dim: 144
+encoder_layerdrop: 0.4
+encoder_layers: 2
+
+# 63 KEYPOINTS (v2.1):
+#   - Pose subset: 15 landmarks (indices 0-14)
+#   - Left Hand: 21 landmarks (indices 15-35)
+#   - Right Hand: 21 landmarks (indices 36-56)
+#   - Face subset: 6 landmarks (indices 57-62)
+#
+# Group Structure (4 groups for normalization):
+#   Group 1: Pose subset (0-14) - 15 keypoints
+#   Group 2: Left hand (15-35) - 21 keypoints
+#   Group 3: Right hand (36-56) - 21 keypoints
+#   Group 4: Face subset (57-62) - 6 keypoints
+
+joint_idx:
+  # Pose subset (15 keypoints: 0-14)
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  # Left hand (21 keypoints: 15-35)
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  - 24
+  - 25
+  - 26
+  - 27
+  - 28
+  - 29
+  - 30
+  - 31
+  - 32
+  - 33
+  - 34
+  - 35
+  # Right hand (21 keypoints: 36-56)
+  - 36
+  - 37
+  - 38
+  - 39
+  - 40
+  - 41
+  - 42
+  - 43
+  - 44
+  - 45
+  - 46
+  - 47
+  - 48
+  - 49
+  - 50
+  - 51
+  - 52
+  - 53
+  - 54
+  - 55
+  - 56
+  # Face subset (6 keypoints: 57-62)
+  - 57
+  - 58
+  - 59
+  - 60
+  - 61
+  - 62
+
+max_position_embeddings: 256
+pe: learn  # learned positional embeddings
+num_labels: 64
