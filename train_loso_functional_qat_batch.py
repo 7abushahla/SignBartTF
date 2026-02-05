@@ -69,7 +69,7 @@ Example usage:
                         help="Batch size for QAT training")
     parser.add_argument("--lr", type=float, default=5e-5,
                         help="Learning rate for QAT fine-tuning")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=379,
                         help="Random seed")
     parser.add_argument("--holdout_only", type=str, default="",
                         help="Run QAT only for specific user (e.g., 'user01') - USE THIS TO TEST FIRST!")

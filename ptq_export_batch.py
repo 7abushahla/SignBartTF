@@ -85,7 +85,7 @@ Example usage:
                         help="Dataset name prefix for experiments (default: arabic_asl)")
     parser.add_argument("--output_root", type=str, default="",
                         help="Base output directory (default: outputs or SIGNBART_OUTPUT_ROOT)")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=379,
                         help="Random seed")
     return parser.parse_args()
 

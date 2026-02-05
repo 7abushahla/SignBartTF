@@ -42,13 +42,23 @@ class SignDataset:
             self.id2label = json.load(f)
         
         self.data_dir = f"{root}/{split}"
-        
-        # Get all file paths
-        self.list_key = [
-            f"{self.data_dir}/{x}/{y}"
-            for x in os.listdir(self.data_dir)
-            for y in os.listdir(f"{self.data_dir}/{x}")
-        ]
+        if not os.path.isdir(self.data_dir):
+            raise FileNotFoundError(f"Split directory not found: {self.data_dir}")
+
+        # Get all pickle paths under: {root}/{split}/{class_dir}/*.pkl
+        # Be defensive against stray files like .DS_Store at any level.
+        list_key = []
+        for x in os.listdir(self.data_dir):
+            class_dir = os.path.join(self.data_dir, x)
+            if not os.path.isdir(class_dir):
+                continue
+            for y in os.listdir(class_dir):
+                if not y.endswith(".pkl"):
+                    continue
+                p = os.path.join(class_dir, y)
+                if os.path.isfile(p):
+                    list_key.append(p)
+        self.list_key = list_key
         
         if shuffle:
             np.random.shuffle(self.list_key)

@@ -297,7 +297,7 @@ def main():
                         help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=2e-4,
                         help="Learning rate")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=379,
                         help="Random seed")
     parser.add_argument("--pretrained_path", type=str, default="",
                         help="Path to pretrained model (.h5 file, optional)")

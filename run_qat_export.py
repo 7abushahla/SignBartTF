@@ -43,7 +43,7 @@ def parse_args():
                         help="Path to model config YAML (e.g., configs/arabic-asl-90kpts.yaml)")
     parser.add_argument("--output_dir", type=str, default="exports/qat_demo",
                         help="Where to store outputs (TFLite files, checkpoints)")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=379,
                         help="Random seed for reproducibility")
     parser.add_argument("--quantize_dense_names", nargs="*", default=None,
                         help="Optional list of substrings for Dense layer names to quantize. "

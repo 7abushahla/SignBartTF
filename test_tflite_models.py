@@ -37,7 +37,7 @@ def parse_args():
                         help="Optional path to QAT dynamic-range TFLite model")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Maximum number of test samples to evaluate (default: all)")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=379,
                         help="Random seed for reproducibility")
     return parser.parse_args()
 

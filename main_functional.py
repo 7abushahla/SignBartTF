@@ -3,6 +3,12 @@ Main training script for SignBART TensorFlow - Functional API Version.
 Uses the functional model API for QAT compatibility.
 """
 import os
+from xla_utils import ensure_xla_cuda_data_dir
+
+# Must run before importing TensorFlow so XLA can locate CUDA's libdevice in
+# conda/pip environments (prevents fatal "libdevice.10.bc" errors).
+ensure_xla_cuda_data_dir()
+
 import argparse
 import random
 import logging
@@ -42,7 +48,7 @@ def get_default_args():
                         help="Path to the config model to be used")
     parser.add_argument("--pretrained_path", type=str, default="",
                         help="Path to pretrained weights (.h5 file)")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=379,
                         help="Seed with which to initialize all the random components of the training")
     parser.add_argument("--task", type=str, default=False, choices=["train", "eval"],
                         help="Whether to train or evaluate the model")

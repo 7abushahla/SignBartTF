@@ -38,7 +38,7 @@ fi
 HOLDOUT_ONLY="${HOLDOUT_ONLY:-""}"
 EPOCHS="${EPOCHS:-80}"
 LR="${LR:-2e-4}"
-SEED="${SEED:-42}"
+SEED="${SEED:-379}"
 NO_VALIDATION="${NO_VALIDATION:-1}"
 RUN_LOSO="${RUN_LOSO:-1}"
 
@@ -132,6 +132,37 @@ ensure_conda_env() {
   exit 1
 }
 
+configure_xla_cuda_dir() {
+  # If XLA gets used on GPU, it needs CUDA's libdevice bitcode. In some conda/pip
+  # setups, XLA fails to locate it automatically and aborts. If we can find a
+  # valid cuda_nvcc root (or system CUDA), set --xla_gpu_cuda_data_dir.
+  if [[ "${XLA_FLAGS:-}" == *"--xla_gpu_cuda_data_dir="* ]]; then
+    return 0
+  fi
+
+  local candidate=""
+  if [[ -n "${XLA_CUDA_DATA_DIR:-}" ]]; then
+    candidate="$XLA_CUDA_DATA_DIR"
+  elif [[ -n "${CONDA_PREFIX:-}" ]]; then
+    candidate="$(ls -d "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/cuda_nvcc 2>/dev/null | sort -V | tail -n 1 || true)"
+    if [[ -n "$candidate" ]] && command -v readlink >/dev/null 2>&1; then
+      candidate="$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")"
+    fi
+  fi
+
+  if [[ -z "$candidate" && -d "/usr/local/cuda" ]]; then
+    candidate="/usr/local/cuda"
+  fi
+
+  if [[ -n "$candidate" && -d "$candidate/nvvm/libdevice" ]]; then
+    if compgen -G "$candidate/nvvm/libdevice/libdevice*.bc" >/dev/null; then
+      export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=$candidate"
+      XLA_FLAGS="$(echo "$XLA_FLAGS" | xargs)"  # trim whitespace
+      log "XLA: using --xla_gpu_cuda_data_dir=$candidate"
+    fi
+  fi
+}
+
 should_flip_user() {
   local user="$1"
   IFS=',' read -r -a users <<< "$FLIP_USERS"
@@ -219,7 +250,7 @@ create_loso_if_needed() {
       echo "Missing $DATA_DIR/all for holdout discovery" >&2
       exit 1
     fi
-    holdouts_csv=$(find "$DATA_DIR/all" -type f -name "*.pkl" -maxdepth 2 -print0 \
+    holdouts_csv=$(find "$DATA_DIR/all" -maxdepth 2 -type f -name "*.pkl" -print0 \
       | xargs -0 -n1 basename \
       | awk -F_ '{print $1}' \
       | sort -u \
@@ -394,6 +425,7 @@ run_qat() {
 
 main() {
   ensure_conda_env
+  configure_xla_cuda_dir
   if [[ "$SKIP_FLIP" == "1" ]]; then
     log "Flip step: skipped (SKIP_FLIP=$SKIP_FLIP)."
   else

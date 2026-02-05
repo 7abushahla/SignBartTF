@@ -64,7 +64,7 @@ def parse_args():
                         help="Annotate loaded model for selective QAT to ensure pipeline works")
     parser.add_argument("--quantize_dense_names", nargs="*", default=None,
                         help="Optional substrings for Dense layer names to quantize (default matches fc/proj/attention)")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=379,
                         help="Random seed for reproducibility")
     return parser.parse_args()
 

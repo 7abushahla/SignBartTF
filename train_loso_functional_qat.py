@@ -21,6 +21,11 @@ import os
 from pathlib import Path
 
 import numpy as np
+from xla_utils import ensure_xla_cuda_data_dir
+
+# Must run before importing TensorFlow so XLA can locate CUDA's libdevice in
+# conda/pip environments (prevents fatal "libdevice.10.bc" errors).
+ensure_xla_cuda_data_dir()
 import tensorflow as tf
 import gc
 from tensorflow import keras
@@ -66,7 +71,7 @@ def parse_args():
                         help="Number of QAT fine-tuning epochs (default: 20)")
     parser.add_argument("--lr", type=float, default=5e-5,
                         help="Learning rate for QAT (default: 5e-5, ~4x lower than FP32 training)")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=379)
     parser.add_argument("--quantize_dense_names", nargs="*", default=None,
                         help="Dense layer name substrings to quantize. "
                              "Default: all Dense layers including FFN (fc1,fc2), attention projections "
